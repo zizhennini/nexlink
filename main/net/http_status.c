@@ -564,12 +564,16 @@ static esp_err_t btn_api_handler(httpd_req_t *req)
 #define CAP_BATCH   64
 #define CAP_CSV_MAX 96
 #define CAP_HEX_MAX 48
+/* A chunk's payload is at most CAPTURE_PAYLOAD_MAX bytes, so its hex form is at
+ * most 2x that plus termination: sizing it here means the hex branch can never
+ * silently emit a short string. */
+#define CAP_HEX_BUF (CAPTURE_PAYLOAD_MAX * 2 + 4)
 
 static esp_err_t capture_get_handler(httpd_req_t *req)
 {
     static capture_chunk_t chunks[CAP_BATCH];
     static char js[8192];
-    static char hexbuf[CAP_HEX_MAX * 2 + 4];
+    static char hexbuf[CAP_HEX_BUF];
     static char csvbuf[1024];
 
     char query[96] = {0};
@@ -651,9 +655,12 @@ static esp_err_t capture_get_handler(httpd_req_t *req)
         (unsigned)n,
         want_hex ? "hex" : "text");
 
+    size_t emitted = 0;
+    bool   cut = false;
+
     for (size_t i = 0; i < n; i++) {
         const capture_chunk_t *c = &chunks[i];
-        if (off > sizeof(js) - 1024) break;   /* keep room for the tail */
+        if (off > sizeof(js) - 1024) { cut = true; break; }   /* keep room for the tail */
 
         if (want_hex) {
             size_t hp = 0;
@@ -662,16 +669,21 @@ static esp_err_t capture_get_handler(httpd_req_t *req)
             hexbuf[hp] = '\0';
             off += (size_t)snprintf(js + off, sizeof(js) - off,
                 "%s{\"seq\":%lu,\"t\":%lld,\"dir\":\"%s\",\"len\":%u,\"trunc\":%s,\"hex\":\"%s\"}",
-                i ? "," : "", (unsigned long)c->seq,
+                emitted ? "," : "", (unsigned long)c->seq,
                 (long long)(c->timestamp_us / 1000), c->dir ? "tx" : "rx",
                 (unsigned)c->len, c->truncated ? "true" : "false", hexbuf);
         } else {
             size_t k = 0;
             off += (size_t)snprintf(js + off, sizeof(js) - off,
                 "%s{\"seq\":%lu,\"t\":%lld,\"dir\":\"%s\",\"len\":%u,\"trunc\":%s,\"text\":\"",
-                i ? "," : "", (unsigned long)c->seq,
+                emitted ? "," : "", (unsigned long)c->seq,
                 (long long)(c->timestamp_us / 1000), c->dir ? "tx" : "rx",
                 (unsigned)c->len, c->truncated ? "true" : "false");
+            /* The bound already reserves room for a 6-char \\uXXXX escape and
+             * the three closing characters, so every branch below stays in
+             * bounds and the object is ALWAYS closed. Emitting a half-open
+             * string here would hand the client invalid JSON, which is worse
+             * than truncating the payload. */
             for (; k < c->len && off < sizeof(js) - 32; k++) {
                 uint8_t b = c->data[k];
                 const char *esc = NULL;
@@ -697,8 +709,15 @@ static esp_err_t capture_get_handler(httpd_req_t *req)
             js[off++] = '}';
             js[off]   = '\0';
         }
+        emitted++;
     }
 
+    /* Say so when the batch was clipped, so a paging client does not mistake a
+     * short response for the end of the log: it should keep following "next". */
+    if (cut)
+        off += (size_t)snprintf(js + off, sizeof(js) - off,
+                                "%s{\"cut\":true}", emitted ? "," : "");
+    if (off > sizeof(js) - 4) off = sizeof(js) - 4;
     off += (size_t)snprintf(js + off, sizeof(js) - off, "]}");
     return httpd_resp_send(req, js, (ssize_t)off);
 }

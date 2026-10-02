@@ -106,6 +106,9 @@ static bool         s_installed;
 static uart_port_t  s_port      = (uart_port_t)SWO_UART_DRIVER;
 static uint32_t     s_baud;               /* 0 = not configured yet */
 static QueueHandle_t s_evt_q;
+/* Set by the event task to NULL right before it deletes itself; SWO_Mode_UART()
+ * waits on it before freeing the UART driver. */
+static volatile TaskHandle_t s_swo_task;
 
 /* UART event task: the ESP-IDF UART driver delivers RX in chunks through an
  * event queue, so this is where bytes actually enter the ring. Priority sits
@@ -119,6 +122,12 @@ static void swo_event_task(void *arg)
     for (;;) {
         if (xQueueReceive(s_evt_q, &ev, portMAX_DELAY) != pdTRUE)
             continue;
+
+        /* Shutdown handshake: SWO_Mode_UART() cannot delete the driver while
+         * this task is blocked inside xQueueReceive(), because the queue
+         * belongs to the driver. It sends this poison event instead, waits for
+         * s_swo_task to be cleared, and only then frees the driver. */
+        if (ev.type == UART_EVENT_MAX) break;
 
         switch (ev.type) {
         case UART_DATA: {
@@ -154,6 +163,11 @@ static void swo_event_task(void *arg)
             break;
         }
     }
+
+    /* Reached only through the shutdown handshake above. Clearing the handle
+     * is what releases SWO_Mode_UART() to free the driver. */
+    s_swo_task = NULL;
+    vTaskDelete(NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -198,6 +212,15 @@ static uint8_t GetTraceStatus(void)
     return status;
 }
 
+/* Record an error flag for the next status report.
+ *
+ * Currently unreferenced: every UART failure path this port can actually hit
+ * (FIFO overflow, buffer full, framing/parity error) is already reported by
+ * SWO_Data() as DAP_SWO_BUFFER_OVERRUN. The hook stays because the other
+ * DAPLink error code, DAP_SWO_STREAM_ERROR, is what ARM's USART callback
+ * raises on a break condition - worth keeping visible if a target turn out to
+ * need it. Marked unused rather than deleted so enabling it is a one-liner. */
+__attribute__((unused))
 static void SetTraceError(uint8_t flag)
 {
     TraceError[TraceError_n] |= flag;
@@ -234,7 +257,8 @@ uint32_t SWO_Mode_UART(uint32_t enable)
             s_evt_q = NULL;
             return 0U;
         }
-        if (xTaskCreate(swo_event_task, "swo_rx", 3072, NULL, 6, NULL) != pdPASS) {
+        if (xTaskCreate(swo_event_task, "swo_rx", 3072, NULL, 6,
+                        (TaskHandle_t *)&s_swo_task) != pdPASS) {
             ESP_LOGE(TAG, "SWO task creation failed");
             uart_driver_delete(s_port);
             s_evt_q = NULL;
@@ -248,12 +272,31 @@ uint32_t SWO_Mode_UART(uint32_t enable)
         return 1U;
     }
 
-    /* Disable: stop capture and hand the peripheral back. */
+    /* Disable: stop capture, then tear the driver down.
+     *
+     * Order matters. uart_driver_delete() frees the event queue, so the event
+     * task must already be out of xQueueReceive() before it runs - otherwise
+     * the queue is freed with the task still blocked on it (the object is
+     * deleted by the driver, so the task's xQueueReceive() is a use-after-free
+     * the moment anything else wakes the scheduler). The poison event is the
+     * handshake: the task sees UART_EVENT_MAX, clears the handle and deletes
+     * itself, and only then is the driver freed. */
     s_active = false;
+
+    if (s_evt_q) {
+        uart_event_t poison = { .type = UART_EVENT_MAX };
+        (void)xQueueSend(s_evt_q, &poison, pdMS_TO_TICKS(50));
+    }
+    for (int i = 0; i < 20 && s_swo_task != NULL; i++)
+        vTaskDelay(pdMS_TO_TICKS(5));
+    if (s_swo_task != NULL)
+        ESP_LOGW(TAG, "SWO task did not stop; freeing the driver anyway");
+
     if (s_installed) {
-        uart_driver_delete(s_port);   /* also frees s_evt_q and stops the task */
+        uart_driver_delete(s_port);   /* frees s_evt_q as well */
         s_installed = false;
         s_evt_q = NULL;
+        s_swo_task = NULL;
     }
     return 1U;
 }
