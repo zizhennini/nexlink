@@ -77,24 +77,24 @@ extern uint32_t    dap_usb_get_tx_packets(void);
 /* ------------------------------------------------------------------ */
 /*  Geometry                                                           */
 /*                                                                     */
-/*  The font cell is 8x16, and the header must keep a full 16px row or  */
-/*  the glyphs get clipped. That leaves 64 - 16 = 48px for the list     */
-/*  and its status row. Packing items at a 14px pitch (the glyphs are   */
-/*  16px but the baseline gap is generous) fits FOUR items plus the     */
-/*  status row where a 16px pitch fitted only three - materially more   */
-/*  information on a screen this small.                                 */
+/*  The panel is 64px tall and the full-size font cell is 16px, so the  */
+/*  budget is exactly four 16px rows: y = 0, 16, 32, 48.               */
+/*                                                                     */
+/*  This was got wrong once by shrinking the row pitch to 14px to fit   */
+/*  a fourth entry: 16 + 3*14 + status = 66px, i.e. 2px past the bottom */
+/*  of the display, while the row's clear band was only 11px against a   */
+/*  16px icon - so icons bled into the following row. Overlap here is   */
+/*  always an arithmetic slip, never a styling choice. The layout below  */
+/*  adds up to 64 exactly and every band is as tall as what it holds.    */
 /* ------------------------------------------------------------------ */
 
 #define ROW_TITLE_Y   0
 #define TITLE_H       16
-#define ROW_ITEM_Y    TITLE_H      /* first item row */
-#define ITEM_PITCH    14           /* tighter than the 16px glyph: the extra
-                                    * 2px is line spacing, not ink, so three
-                                    * items fit with the status row below at
-                                    * y=58 and the glyphs are not clipped */
-#define ITEM_ROWS     3
-#define ROW_STATUS_Y  58           /* last row: value editor for adjustable items */
-#define TEXT_COLS     16           /* 128 / 8 */
+#define ROW_ITEM_Y    TITLE_H       /* first item row                    */
+#define ITEM_PITCH    16            /* one full font cell per entry      */
+#define ITEM_ROWS     2             /* 16 + 2*16 = 48, status row at 48  */
+#define ROW_STATUS_Y  48            /* the fourth and last row           */
+#define TEXT_COLS     16            /* 128 / 8 */
 
 /* ------------------------------------------------------------------ */
 /*  Menu table types                                                   */
@@ -220,21 +220,23 @@ static void small_str(int x, int y, const char *s, bool inverted)
     }
 }
 
-#define SMALL_LINE_H (UI_FONT_H + 4)        /* 11px: glyph plus leading */
+#define SMALL_LINE_H 16                     /* the row band, not the glyph */
 
-/* One list row: 16x16 icon, then small text. The 1+16+1 icon cell leaves 14
- * small-font characters for the label. */
-#define LIST_ICON_X   1
-#define LIST_TEXT_X   (LIST_ICON_X + 16 + 1)
+/* One list row: 16x16 icon, then small text, both centred in a full 16px band
+ * so the icon can never extend past the strip that was cleared for it. */
+#define LIST_ICON_X   2
+#define LIST_TEXT_X   (LIST_ICON_X + 16 + 2)
 
 static void list_row(int y, const uint8_t *icon, const char *label, bool selected)
 {
-    /* Clear first: the selection band XORs nothing, so a longer previous label
-     * would otherwise leave its tail behind (the "text on top of text" bug). */
+    /* Clear the whole 16px band first. The selection band is a plain fill, so
+     * a previous longer label would otherwise leave its tail behind - text on
+     * top of text, which is what "overlapping" looked like. */
     oled_fill_rect(0, y, OLED_WIDTH, SMALL_LINE_H, false);
     if (selected) oled_fill_rect(0, y, OLED_WIDTH, SMALL_LINE_H, true);
-    if (icon) oled_bitmap(LIST_ICON_X, y - 2, 16, 16, icon, selected);
-    small_str(LIST_TEXT_X, y, label, selected);
+    if (icon) oled_bitmap(LIST_ICON_X, y, 16, 16, icon, selected);
+    /* 7px glyph centred in the 16px band: (16 - 7) / 2 = 4.5 -> 5 */
+    small_str(LIST_TEXT_X, y + 5, label, selected);
 }
 
 static void title_row(const char *title)
