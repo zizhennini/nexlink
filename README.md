@@ -137,6 +137,9 @@ python tools/ws_console.py --host <IP> --raw > log.bin # 只导出目标板数�
 > 设计上刻意做成**有界队列 + 丢帧**：浏览器卡住时丢的是网页帧，绝不会给 UART 数据通路施加反压。
 > 无客户端连接时完全不入队，空闲零开销。
 
+> 广播项内含一份 1 KB 载荷，`ws_broadcast_data()` 最坏会在调用者栈上多占约 1 KB。
+> 两个调用方的栈都够：UART 事件任务 4 KB、httpd 任务 8 KB（`cfg.stack_size = 8192`）。
+
 ### 🚀 OTA 无线升级 + 自动回滚
 
 - 双 OTA 槽（各 4 MB）+ `otadata`，`POST /api/ota` 把固件写入**非活动槽**后自动重启
@@ -231,6 +234,8 @@ JTAG 的价值在于覆盖 SWD 覆盖不到的目标：**RISC-V**（ESP32-C3/C6�
 - **实现**：[`main/swo_uart.c`](main/swo_uart.c)。ARM 原版 `SWO.c` 依赖 CMSIS `Driver_USART`（ESP-IDF 没有），
   所以按 ESP-IDF UART 驱动重写了字节来源，**命令层、响应编码、错误位语义与 ARM v2.0.1 完全一致**
 - 溢出通过标准的 `DAP_SWO_BUFFER_OVERRUN` 状态位上报，主机的既有判断逻辑无需改动
+- **资源占用**：UART2 + 一个 4 KB 栈的事件任务，优先级 6（低于串口桥的 8），
+  所以 SWO 跟踪不会饿死 DUT 通道；关闭 SWO 时用哨兵事件握手停机，再释放 UART 驱动
 
 在 IDE 里这样用：Keil 勾选 *Trace → SWO*；pyOCD 用 `--swo`；OpenOCD 配 `cmsis_dap` 的 SWO 通道。
 

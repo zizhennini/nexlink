@@ -41,7 +41,13 @@ int ws_client_count(void);
  *
  * Data is only enqueued when at least one client is attached, so an idle
  * device pays nothing. Returns ESP_OK when queued (or when there is nothing to
- * do), ESP_ERR_NO_MEM when the queue is full/dropped. */
+ * do), ESP_ERR_NO_MEM when the queue is full/dropped.
+ *
+ * STACK: one queue item carries up to WS_PAYLOAD_MAX (1 kB) of payload, and
+ * these helpers copy into a local item before queueing, so a caller can see
+ * roughly 1 kB of extra stack use. Both callers have room: the UART event task
+ * has 4 kB (SERIAL_STACK_SIZE) and the httpd task 8 kB (cfg.stack_size).
+ * Long runs are split into several frames rather than dropped. */
 esp_err_t ws_broadcast_data(int dir, const uint8_t *data, size_t len);
 
 /* Push a small JSON control message (status snapshots, hello, errors). */
