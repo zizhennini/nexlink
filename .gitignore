@@ -11,5 +11,9 @@ dependencies.lock
 __pycache__/
 *.pyc
 
+# 临时文件
+*.tmp
+*commitmsg*
+
 # 旧上游 git 历史的本地备份（仅本机保留，不入库）
 .git-backup-upstream.zip

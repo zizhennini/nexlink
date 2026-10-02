@@ -345,8 +345,8 @@ extern void     DAP_Setup (void);
 // which the Xtensa compiler deletes outright at -O2 -- `count` is dead after
 // the loop, so the whole thing folds away and PIN_DELAY()/Delayms() become
 // no-ops.  That leaves the SWD clock running at raw GPIO speed (~25 MHz on
-// this ESP32-S3, far beyond what the TXB0106 level shifter and jumper wires
-// can carry) and makes DAP_SWJ_Clock / DAP_Delay lie to the host.
+// this ESP32-S3, far beyond what jumper wires can carry) and makes
+// DAP_SWJ_Clock / DAP_Delay lie to the host.
 //
 // An empty `__asm__ __volatile__` body cannot be elided, so the loop
 // survives: on Xtensa LX7 it compiles to `nop; addi.n a8,-1; bnez.n` = 3

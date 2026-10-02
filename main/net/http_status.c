@@ -153,7 +153,7 @@ static const char s_index_html[] =
 "<div style='font-size:11px;color:var(--muted);margin-top:2px'>选 build 里的 nexlink.bin 直接刷入；新固件启动失败会自动回滚到当前版本</div>"
 "</div>"
 "<div class='log-box' id='pinsbox' style='margin-top:8px;display:none'><b>引脚协议分配</b>"
-"<div style='font-size:11px;color:var(--muted);margin-top:2px'>5 个固定 J3 信号脚，下拉切换协议（自动交换）</div>"
+"<div style='font-size:11px;color:var(--muted);margin-top:2px'>5 个拓展 IO，下拉切换协议（自动交换）</div>"
 "<div id='pinlist' style='margin-top:4px'></div>"
 "<div style='margin-top:6px'><button onclick='savePins()' class='btn-accent'>保存</button>"
 "<span id='pinmsg' style='margin-left:8px;color:var(--muted);font-size:12px'></span></div>"

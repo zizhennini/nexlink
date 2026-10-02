@@ -13,6 +13,20 @@ SPI/I2C/PWM 协议分析仪、以及让 AI 直接操控硬件的 MCP 接口。
 > ST7735S 彩屏并释放 5 个 IO、新增 OTA 双槽回滚、DUT 复位控制与 USB 免串口诊断，
 > 并修复了 I2C/SWD/TCP/WiFi/按键的既有缺陷。
 
+## 🧩 板载硬件
+
+| 部件 | 说明 |
+|------|------|
+| MCU | ESP32-S3-WROOM-1-**N16R8**（16 MB quad flash + 8 MB octal PSRAM） |
+| 供电 | **USB-C** 5V 输入 → 板载 **LDO** → 3.3V 供 S3；3V3 同时引到排针给目标供电 |
+| 按键 | **BOOT**（下载模式）+ **EN**（复位），均带 3V3 上拉；另有 SW1/SW2/SW3 三个功能键（IO1/IO2/IO42） |
+| 显示 | SSD1306 0.96" 128×64 OLED，I2C0（IO10/IO11），地址 0x3C |
+| 扩展 | **16 Pin 排针**：5V、3V3、GND×2、TXD0/RXD0、TXD1/RXD1、SCL/SDA、NRST/SWCLK/SWDIO、拓展 IO×5 |
+| 电平转换 | **无**。当前 PCB 已取消 TXB0106，所有信号直连 ESP32-S3（**整板 3.3V**） |
+
+> ⚠️ 排针**不带电平转换**：接 3.3V 目标安全，接 **5V 逻辑目标必须自行加转换**——
+> 原来的 TXB0106 已经取消。详见 [硬件与引脚](#-硬件与引脚)。
+
 ---
 
 ## ✨ 功能特点
@@ -85,8 +99,12 @@ RX Monitor · I2C Bus · SPI Bus · PWM · SWD/DAP · Status · Config · AI/MCP
 
 ### 🎯 DUT 复位控制
 
-`GET /api/dut/reset?ms=25&boot=1` 通过 TXB0106 拉低 NRST 复位目标板，
-`boot=1` 时同时保持 BOOT 为低 —— 配合 `ttl` 模式可**全程无线**给另一块 MCU 烧录。
+`GET /api/dut/reset?ms=25&boot=1` 直接拉低排针上的 **NRST（IO12）** 复位目标板，
+`boot=1` 时同时保持 **BOOT** 为低 —— 配合 `ttl` 模式可**全程无线**给另一块 MCU 烧录。
+
+> BOOT 没有专用引脚：它用的是当前被分配为 `GPIO` 协议的那个拓展 IO。
+> 所以要在 Web 页把某个拓展 IO 设成 `GPIO`，再把它接到目标的 BOOT/IO0。
+> NRST（IO12）是固定的，随排针引出。
 
 ### 🤖 AI 集成（MCP Server）
 
@@ -96,38 +114,49 @@ RX Monitor · I2C Bus · SPI Bus · PWM · SWD/DAP · Status · Config · AI/MCP
 
 ---
 
-## 🔌 引脚分配
+## 🔌 硬件与引脚
 
-引脚真源是 [`main/pinout.h`](main/pinout.h)，共两组：
+板载硬件见上文 [板载硬件](#-板载硬件)。本节是排针的完整信号定义。
 
-### 固定专用总线（不可改）
+### 16 Pin 排针
 
-| 功能 | 引脚 |
-|------|------|
-| UART0 控制台 | TX=IO43, RX=IO44 |
-| UART1 → DUT（经 TXB0106） | TX=IO47, RX=IO21 |
-| SWD 探针（经 TXB0106 到 J3） | SWCLK=IO13, SWDIO=IO14, NRST=IO12 |
-| OLED（I2C0） | SCL=IO10, SDA=IO11 |
-| 按键（低有效） | SW1=IO1, SW2=IO2, SW3=IO42 |
+| 排针信号 | ESP32-S3 | 用途 |
+|---------|----------|------|
+| 5V | — | USB-C 5V 直出（给目标供电或取电） |
+| 3V3 | — | LDO 输出（给目标供电） |
+| GND ×2 | — | 共地 |
+| **TXD0 / RXD0** | IO43 / IO44 | **本板控制台**（日志，115200） |
+| **TXD1 / RXD1** | IO47 / IO21 | 到目标板的串口桥（TCP 3333 / USB-TTL 走这条） |
+| **SCL / SDA** | IO10 / IO11 | I2C0，与 OLED 共用总线；可嗅探外部 I2C |
+| **NRST** | IO12 | 目标复位（`/api/dut/reset`） |
+| **SWCLK / SWDIO** | IO13 / IO14 | **CMSIS-DAP 探针**（`dap` 模式） |
+| **拓展 IO ×5** | IO48 / IO45 / IO38 / IO39 / IO40 | 协议可排列：`PWM / GPIO / SCK / MOSI / MISO / CS / SDA / SCL` |
 
-### 5 个自由 IO（协议可排列，持久化到 NVS）
+引脚真源是 [`main/pinout.h`](main/pinout.h)。
 
-| 槽位 | IO |
-|------|-----|
-| FREE_1 | IO48 |
-| FREE_2 | IO45（strapping） |
-| FREE_3 | IO38 |
-| FREE_4 | IO39 |
-| FREE_5 | IO40 |
+### ⚡ 逻辑电平警告
 
-这 5 个槽位上可排列 **PWM / GPIO / SCK / MOSI / MISO / CS / SDA / SCL**（互不重复）。
-Web 页、OLED Config 页或 MCP 的 `set_pins` 都能改。
+**整板 3.3V，排针不带电平转换。**
 
-> **"引脚配置"的真实含义**：IO 号本身不可改，改的是这 5 个固定 IO 上承载哪种协议。
+- 所有信号直连 ESP32-S3，接 **3.3V 目标**是安全的
+- 接 **5V 逻辑目标**（老式 Arduino、某些 8051/AVR 板）**必须自行加电平转换**
+  （原来的 TXB0106 已经取消了）
+- 反向同理：目标板往 ESP32-S3 灌 5V 会损坏 IO
+
+唯一带 3V3 上拉的是 **BOOT 和 EN 两个按键**，与排针无关。
+
+### 引脚配置的真实含义
+
+拓展 IO 的**协议功能可排列并持久化到 NVS**，但 **IO 号本身不可改**——
+改的是那 5 个固定 IO（IO48/IO45/IO38/IO39/IO40）上各自承载哪种协议。
+Web 页、OLED Config 页或 MCP 的 `set_pins` 都能改，自动交换、拒绝非法排列。
+
+> `IO45` 同时是 strapping 引脚（VDD_SPI），复位瞬间被外部拉低可能影响启动模式。
 
 ### 不可用的 IO
 
-`IO19/IO20` 原生 USB（DAP/TTL 占用）· `IO26–IO32` SPI0/1 flash · `IO33–IO37` Octal PSRAM · `IO43/IO44` 控制台
+`IO19/IO20` 原生 USB（DAP/TTL 占用）· `IO26–IO32` SPI0/1 flash · `IO33–IO37` Octal PSRAM
+（`IO43/IO44` 已作为 TXD0/RXD0 引出，可用但会与日志输出冲突）
 
 ---
 
@@ -160,8 +189,9 @@ idf.py -p COMx flash monitor
 
 ### 控制台
 
-控制台在 **UART0（IO43 TX / IO44 RX，115200）**，因为原生 USB 已被 DAP 探针占用。
-用 3.3V USB-TTL 转接板交叉接线（转接板 RX→IO43、TX→IO44、GND↔GND）即可看日志。
+控制台在 **UART0（IO43 TX / IO44 RX，115200）**，已作为 **TXD0 / RXD0** 引到排针，
+因为原生 USB 已被 DAP 探针占用。
+用 3.3V USB-TTL 转接板交叉接线（转接板 RX→TXD0、TX→RXD0、GND↔GND）即可看日志。
 
 **刷坏后的恢复**：按住 BOOT → 点 RESET → 松开 BOOT，ROM 会恢复 USB-Serial-JTAG，
 `idf.py -p COMx flash` 仍可救回。
@@ -205,14 +235,16 @@ python tools/wifi_serial_bridge.py --status       # 只看状态
 
 **C. 当 USB-TTL 下载器（给另一块 MCU 烧录）**
 
-1. 角色切到 `ttl`，把目标板的 UART + NRST + BOOT 接到 J3
+1. 角色切到 `ttl`，把目标板的 UART 接到排针 **TXD1 / RXD1**（交叉：TXD1→目标 RX、RXD1←目标 TX），
+   目标复位接 **NRST**，目标 BOOT/IO0 接任意一个被设为 `GPIO` 协议的拓展 IO，并共地
 2. 电脑出现虚拟 COM 口，直接用 esptool / STM32 Flash Loader 下载
-3. 可用 `GET /api/dut/reset?boot=1` 让目标进下载模式
+3. 可用 `GET /api/dut/reset?boot=1` 让目标进下载模式（无需按按键）
 
 **D. 当协议分析仪**
 
-在 Web 页把 5 个自由 IO 配上 SPI 或 I2C 协议，然后把探针接到目标总线；
+在 Web 页把拓展 IO 配上 SPI 或 I2C 协议，然后把探针接到目标总线；
 `/api/spi` / `/api/i2c` 会返回抓到的历史事务，OLED 上也能实时滚屏查看。
+注意探针同样是 3.3V 直连，5V 总线请先做电平转换，否则会打坏 IO。
 
 ### 无线固件升级（OTA）
 
@@ -273,7 +305,6 @@ nexlink/
 │   ├── swd/                   # SWD bit-bang + TCP 侧 CMSIS-DAP 处理器
 │   └── wifi/                  # WiFi STA/AP 管理
 ├── managed_components/        # 托管组件（CherryUSB 内含 USB 诊断钩子）
-├── components/                # 自定义组件
 ├── mcp/                       # MCP Server（AI 集成）+ 一键安装脚本
 ├── tools/                     # 主机侧辅助脚本（com0com 虚拟串口桥）
 ├── partitions.csv             # 双 OTA 分区表
@@ -302,7 +333,7 @@ nexlink/
 | `CONFIG_CHERRYUSB` + `_DEVICE` + `_DEVICE_SPEED_FS` + `_DEVICE_DWC2_ESP` | DAP 探针的 USB 设备栈 |
 | `CONFIG_CHERRYUSB_DEVICE_CDC_ACM` | USB-TTL 下载桥 |
 | `CONFIG_ESP_PHY_ENABLE_USB=y` | 否则 `esp_wifi_init()` 会关掉 USB PHY，探针一联网就掉线 |
-| `CONFIG_ESP_CONSOLE_UART_DEFAULT` + `CONFIG_ESP_CONSOLE_SECONDARY_NONE=y` | 让出原生 USB给 DAP |
+| `CONFIG_ESP_CONSOLE_UART_DEFAULT` + `CONFIG_ESP_CONSOLE_SECONDARY_NONE=y` | 让出原生 USB 给 DAP |
 | `CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2=y` | `i2c_mon.c` 用的是 IDF 5.5 的 v2 从机 API |
 | `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` | OTA 崩溃自动回滚 |
 
@@ -336,7 +367,10 @@ Windows 会把"此设备没有 OS 描述符"的结论按 `HKLM\SYSTEM\CurrentCon
 
 **6. 串口无数据** — 核对波特率（`/api/status` 可查当前值）、确认 TX/RX 交叉接线、确认目标板有输出。
 
-**7. OTA 报 curl 错误 56** — 忘了加 `-H "Expect:"`。
+**7. 接 5V 目标板后 IO 损坏 / 行为异常** — 排针**没有电平转换**（TXB0106 已取消），
+信号线是 ESP32-S3 原生 3.3V，5V 目标必须自行加转换后再接。
+
+**8. OTA 报 curl 错误 56** — 忘了加 `-H "Expect:"`。
 
 ### 调试手段
 

@@ -81,8 +81,8 @@
 #define DAP_DEFAULT_PORT        DAP_PORT_SWD
 
 /// Initial SWJ clock in Hz; DAP_SWJ_Clock can change it at runtime.
-/// 1 MHz is deliberately conservative -- the SWD lines run through a TXB0106
-/// level shifter and then jumper wires, so a high default clock is unreliable.
+/// Kept moderate: the SWD pins are bit-banged by the CPU, so the ceiling is
+/// the GPIO toggle loop plus lead/jumper capacitance, not the target.
 #define DAP_DEFAULT_SWJ_CLOCK   1000000U
 
 /// Maximum packet size.  ESP32-S3's USB-OTG peripheral is full speed, so the

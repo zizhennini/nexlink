@@ -5,7 +5,7 @@
  * With the USB mode set to TTL (Config page / pin_config_set_usb_mode), the
  * USB-C port enumerates as a standard CDC-ACM serial device, so host-side
  * flash tools (esptool, STM32 Flash Loader, any terminal) can talk to the
- * target MCU through the board's TX/RX level-shifted header pins - the board
+ * target MCU through the board's TXD1/RXD1 header pins - the board
  * becomes an ordinary USB-TTL dongle, plus:
  *
  *   - the host's baud rate (CDC SET_LINE_CODING) drives UART1 directly,
@@ -15,7 +15,7 @@
  *         RST_n  = !RTS   (the fixed NRST pin)
  *     which is exactly the semantics esptool's ClassicReset drives, so an
  *     ESP target drops into its ROM bootloader without touching a button
- *     (BOOT must be wired to the GPIO slot; NRST already goes to J3).
+ *     (BOOT must be wired to the GPIO slot; NRST is broken out on the header).
  *
  * The USB PHY claim is permanent for the boot (same rule as dap_usb.c): the
  * mode is persisted and switching DAP <-> TTL takes effect after a reboot.

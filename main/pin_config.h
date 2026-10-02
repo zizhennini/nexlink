@@ -19,7 +19,7 @@ extern "C" {
  *     persisted in NVS. This is what "pin configuration" means on this board.
  * ============================================================ */
 
-/* Kinds shown on the expansion / J3 diagram. 5V/GND/DUT are power and
+/* Kinds shown on the pin-header / expansion diagram. 5V/3V3/GND are power and
  * reference (fixed); SWCLK/SWDIO/NRST/TX/RX are fixed dedicated signals; the
  * remaining kinds can be assigned to one of the free IOs. */
 typedef enum {
