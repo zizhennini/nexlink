@@ -5,7 +5,9 @@
 #include <stdio.h>
 #include "esp_log.h"
 #include "driver/gpio.h"
-#include "driver/spi_master.h"
+/* spi_mon.h / i2c_mon.h expose the stop APIs used below; the SPI and I2C
+ * drivers themselves are not called directly any more (bus release is the
+ * monitor's own job), so driver/spi_master.h is deliberately not included. */
 #include "spi_mon.h"
 #include "i2c_mon.h"
 #include "pin_config.h"
@@ -56,9 +58,19 @@ void debug_pins_report(char *buf, unsigned len)
 
 /* Release a GPIO from whatever peripheral/monitor currently owns it.
  *
- * Order matters: the monitor has to be told to close its driver first (an SPI
- * or I2C driver keeps routing the pin through the GPIO matrix), and only then
- * can gpio_reset_pin() detach the pad cleanly. */
+ * Order matters: the owner has to close its driver first (an SPI or I2C driver
+ * keeps routing the pin through the GPIO matrix), and only then can
+ * gpio_reset_pin() detach the pad cleanly.
+ *
+ * Both SPI personalities have to be checked, and each has to be stopped
+ * through its own API - they do not share a bus handle lifetime:
+ *   capture  : spi_slave_initialize() ... spi_slave_free()   (s_running)
+ *   user tool: spi_bus_initialize()   ... spi_bus_free()     (s_send_running)
+ * Calling spi_bus_free() directly while the user-tool master owns the bus was
+ * a bug: it releases the peripheral but leaves s_send_running true, so the
+ * next spi_send_stop() would free the bus a second time. spi_send_stop()
+ * clears the flag as well, so it is the only call made here.
+ * (spi_mon_stop() already stops the user-tool master itself when it is up.) */
 static void release_io(int io)
 {
     const bool is_spi = (io == pin_config_spi_sck()  || io == pin_config_spi_mosi() ||
@@ -66,24 +78,29 @@ static void release_io(int io)
     const bool is_i2c = (io == pin_config_i2c_sda()  || io == pin_config_i2c_scl());
 
     if (is_spi) {
+        bool was = false;
         if (spi_mon_running()) {
             ESP_LOGW(TAG, "expansion IO%d was the SPI monitor - stopping it for the debug probe", io);
             spi_mon_stop();
+            was = true;
         }
-        /* spi_mon_stop() already frees SPI3_HOST; if the user-tool master
-         * (/api/spi/send) happens to own it instead, free it here so the pad
-         * is not still routed through the SPI matrix. A free on a bus that is
-         * not initialised just returns an error, which is fine. */
-        if (!spi_mon_running()) spi_bus_free(SPI3_HOST);
+        if (spi_send_running()) {
+            ESP_LOGW(TAG, "expansion IO%d was the SPI user-tool master - stopping it for the debug probe", io);
+            spi_send_stop();
+            was = true;
+        }
+        if (!was && !spi_mon_running() && !spi_send_running())
+            ESP_LOGD(TAG, "expansion IO%d was assigned to SPI but no SPI owner was running", io);
     } else if (is_i2c) {
         if (i2c_mon_running()) {
             ESP_LOGW(TAG, "expansion IO%d was the I2C monitor - stopping it for the debug probe", io);
             i2c_mon_stop();
         }
-        /* The monitor's slave device and the user-tool master bus are two
-         * separate handles (I2C_NUM_1); i2c_send_stop() releases the master
-         * bus, and i2c_mon_stop() released the slave above. */
-        if (!i2c_mon_running()) i2c_send_stop();
+        /* The monitor's slave device and the user-tool master bus are separate
+         * handles on I2C_NUM_1: i2c_mon_stop() released the slave above, and
+         * i2c_send_stop() releases the master bus (a no-op when it never
+         * started, which is why it is called unconditionally). */
+        i2c_send_stop();
     }
 
     gpio_reset_pin((gpio_num_t)io);
