@@ -63,6 +63,7 @@
 #include "i2c_mon.h"
 #include "capture.h"
 #include "debug_pins.h"
+#include "ui_assets.h"        /* generated: 16x16 icons + 5x7 body font */
 
 static const char *TAG = "menu";
 
@@ -112,6 +113,7 @@ typedef void (*menu_adjust_t)(int dir);
 struct menu_def {
     const char          *title;
     const char *const   *items;
+    const uint8_t *const *icons;   /* parallel to items; NULL = text only */
     uint8_t              count;
     menu_dispatch_t      dispatch;
     menu_adjust_t        adjust;   /* NULL for a plain list */
@@ -192,6 +194,47 @@ static void row_kv(int y, const char *k, const char *v)
     char line[TEXT_COLS + 1];
     snprintf(line, sizeof(line), "%-6.6s%.10s", k, v);
     row_text(y, line, false);
+}
+
+/* ---- Small (5x7) body text and icon rows ------------------------------
+ *
+ * This is the visual hierarchy the reference UIs rely on: the header uses the
+ * full 8x16 face while the list body uses a small one. It also buys density -
+ * a 5x7 glyph is 6px advance and 8px tall, so a row is ~11px instead of 16px,
+ * which is how those menus fit 4-5 entries where a single font fits 3.
+ */
+static void small_str(int x, int y, const char *s, bool inverted)
+{
+    for (; *s; s++) {
+        unsigned char ch = (unsigned char)*s;
+        if (ch < UI_FONT_FIRST || ch > UI_FONT_LAST) ch = '?';
+        const uint8_t *g = ui_font5x7[ch - UI_FONT_FIRST];
+        for (int r = 0; r < UI_FONT_H; r++) {
+            for (int c = 0; c < UI_FONT_W; c++) {
+                bool lit = (g[r] >> (7 - c)) & 1;
+                oled_pixel(x + c, y + r, inverted ? !lit : lit);
+            }
+        }
+        x += UI_FONT_W + 1;                 /* one column of letter spacing */
+        if (x + UI_FONT_W > OLED_WIDTH) break;
+    }
+}
+
+#define SMALL_LINE_H (UI_FONT_H + 4)        /* 11px: glyph plus leading */
+
+/* One list row: 16x16 icon, then small text. The 1+16+1 icon cell leaves 14
+ * small-font characters for the label. */
+#define LIST_ICON_X   1
+#define LIST_TEXT_X   (LIST_ICON_X + 16 + 1)
+
+static void list_row(int y, const uint8_t *icon, const char *label, bool selected)
+{
+    /* Clear first: the selection band XORs nothing, so a longer previous label
+     * would otherwise leave its tail behind (the "text on top of text" bug). */
+    oled_fill_rect(0, y, OLED_WIDTH, SMALL_LINE_H, false);
+    if (selected) oled_fill_rect(0, y, OLED_WIDTH, SMALL_LINE_H, true);
+    if (icon) oled_bitmap(LIST_ICON_X, y - 2, 16, 16, icon, selected);
+    small_str(LIST_TEXT_X, y, label, selected);
 }
 
 static void title_row(const char *title)
@@ -541,11 +584,29 @@ static void info_dispatch(int sel)
 static const char *const root_items[] = { "Monitor", "Probe", "System", "Info" };
 static void root_dispatch(int sel);
 
-static const menu_def_t menu_root = { "NexLink", root_items, 4, root_dispatch, NULL };
-static const menu_def_t menu_mon  = { "Monitor", mon_items,  7, mon_dispatch,  NULL };
-static const menu_def_t menu_prb  = { "Probe",   probe_items,7, probe_dispatch,NULL };
-static const menu_def_t menu_sys  = { "System",  sys_items,  8, sys_dispatch,  sys_edit };
-static const menu_def_t menu_inf  = { "Info",    info_items, 6, info_dispatch, NULL };
+/* Icon per entry; the editor and action rows get no icon so the value is the
+ * only thing on the line. Order matches each items[] array exactly. */
+static const uint8_t *const icons_mon[] = {
+    ICON_BACK, ICON_SERIAL, ICON_BUS, ICON_BUS, ICON_WAVE, ICON_LIST, NULL,
+};
+static const uint8_t *const icons_prb[] = {
+    ICON_BACK, ICON_PROBE, ICON_CHIP, ICON_LIGHTNING, ICON_USB, ICON_USB, ICON_USB,
+};
+static const uint8_t *const icons_sys[] = {
+    ICON_BACK, NULL, NULL, NULL, NULL, NULL, NULL, ICON_NETWORK,
+};
+static const uint8_t *const icons_inf[] = {
+    ICON_BACK, ICON_CHIP, ICON_NETWORK, ICON_CPU, ICON_USB, ICON_CPU,
+};
+static const uint8_t *const icons_root[] = {
+    ICON_SERIAL, ICON_PROBE, ICON_FOLDER, ICON_LIST,
+};
+
+static const menu_def_t menu_root = { "NexLink", root_items, icons_root, 4, root_dispatch, NULL };
+static const menu_def_t menu_mon  = { "Monitor", mon_items,  icons_mon,  7, mon_dispatch,  NULL };
+static const menu_def_t menu_prb  = { "Probe",   probe_items,icons_prb,  7, probe_dispatch,NULL };
+static const menu_def_t menu_sys  = { "System",  sys_items,  icons_sys,  8, sys_dispatch,  sys_edit };
+static const menu_def_t menu_inf  = { "Info",    info_items, icons_inf,  6, info_dispatch, NULL };
 
 /* "Back" from a nested list returns to the root. Only one level of nesting
  * exists, so this needs no stack: the parent is always the root list. */
@@ -798,9 +859,10 @@ static void render_list(void)
         int idx = first + row;
         int y = ROW_ITEM_Y + row * ITEM_PITCH;
         if (idx >= s_menu->count) { row_clear(y); continue; }
-        /* Selected row is drawn as an inverted band; row_text() clears the row
-         * first so no tail of a previously longer label can survive. */
-        row_text(y, s_menu->items[idx], idx == s_cursor);
+        /* Icon + small-font label. list_row() clears the band first, which is
+         * what stops a longer previous label leaving its tail on screen. */
+        const uint8_t *ic = s_menu->icons ? s_menu->icons[idx] : NULL;
+        list_row(y, ic, s_menu->items[idx], idx == s_cursor);
     }
 
     /* Scroll indicator instead of a textual hint: it says "there is more" in
