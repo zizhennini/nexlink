@@ -11,6 +11,8 @@ idf_component_register(SRCS
                        "display/cjk_font.c"
                        "net/tcp_server.c"
                        "net/http_status.c"
+                       # WebSocket push (real-time UART stream to the web UI)
+                       "net/ws_server.c"
                        # USB enumeration trace (diagnostic; /api/usbtrace)
                        "net/usbtrace.c"
                        "serial/serial_bridge.c"

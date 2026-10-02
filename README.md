@@ -101,6 +101,38 @@ curl "http://<IP>/api/capture?since=0&max=96&fmt=csv" -o capture.csv
 curl "http://<IP>/api/capture?want=meta"
 ```
 
+### ⚡ WebSocket 实时推送
+
+轮询 `/api/data` 每次都要一个请求往返，突发数据还会被合并或丢失。WebSocket 改成**服务端主动推**：
+
+- **端点**：`ws://<IP>/ws` —— 与 REST 共用 80 端口，不需要额外开端口
+- **UART 数据即时下发**：二进制帧，首字节是方向标记（`0x00` = RX 目标→主机，`0x01` = TX 主机→目标）
+- **反向命令**：客户端发 JSON 文本帧即可控制设备
+
+| 客户端发送 | 作用 |
+|---|---|
+| `{"cmd":"send","data":"AT\r\n"}` | 发送文本到目标（`{"cmd":"send","v":"AT"}` 为简写） |
+| `{"cmd":"raw","hex":"AA55"}` | 发送任意二进制 |
+| `{"cmd":"baud","v":921600}` | 切换波特率 |
+| `{"cmd":"clear","v":"capture"}` | 清空抓包历史（`v` 可为 `serial`/`capture`/`all`） |
+| `{"cmd":"status"}` | 请求一次状态快照 |
+| `{"cmd":"capture","v":20}` | 让设备回推最近 N 条抓包历史 |
+
+设备回推的文本帧是 JSON：`{"t":"status"|"ack"|"baud"|"capture", ...}`。
+
+**参考客户端** [tools/ws_console.py](tools/ws_console.py)：
+
+```bash
+pip install -r tools/requirements.txt
+python tools/ws_console.py --host <IP>                 # 实时控制台（彩色区分 TX/RX）
+python tools/ws_console.py --host <IP> --raw > log.bin # 只导出目标板数据
+```
+
+控制台里的本地命令：`/status`、`/capture [n]`、`/clear [what]`、`/baud <n>`。
+
+> 设计上刻意做成**有界队列 + 丢帧**：浏览器卡住时丢的是网页帧，绝不会给 UART 数据通路施加反压。
+> 无客户端连接时完全不入队，空闲零开销。
+
 ### 🚀 OTA 无线升级 + 自动回滚
 
 - 双 OTA 槽（各 4 MB）+ `otadata`，`POST /api/ota` 把固件写入**非活动槽**后自动重启
@@ -288,6 +320,7 @@ curl.exe -H "Expect:" -X POST --data-binary "@build\nexlink.bin" http://<IP>/api
 | GET | `/api/status` | 状态大 JSON：WiFi/IP/波特率/收发计数/USB 角色/DAP 计数/OTA 槽位 |
 | GET | `/api/data` · `/api/mcp/data` | 读串口缓冲（后者是 MCP 独立缓冲，不抢 Web） |
 | GET | `/api/capture` | **带时间戳与方向的抓包历史**：`?since=&max=&fmt=text\|hex\|csv&want=chunks\|meta` |
+| WS | `/ws` | **实时推送**：UART 数据即时下发 + JSON 反向命令（详见「WebSocket 实时推送」） |
 | POST | `/api/send` | 发串口数据（单请求上限 512 B） |
 | GET | `/api/baud?b=115200` | 切波特率 |
 | GET | `/api/pins` · POST `/api/pins` | 读/写引脚协议排列 |
@@ -315,21 +348,22 @@ nexlink/
 │   ├── main.c                 # 入口：启动链 + USB 安全模式守卫 + OTA 健康检查
 │   ├── pinout.h               # ★ 引脚真源
 │   ├── pin_config.c/h         # 5 个自由 IO 的协议排列 + USB 角色持久化 (NVS)
+│   ├── capture.c/h            # 带时间戳与方向的抓包环形缓冲
 │   ├── pwm_mon.c/h            # PWM 测量 (RMT) + LEDC 输出
 │   ├── spi_mon.c/h            # SPI 从机抓包 / 主机发送
 │   ├── i2c_mon.c/h            # I2C 从机抓包 / RMT 被动嗅探
 │   ├── buttons/               # 按键驱动（去抖 / 长按，无双击延迟）
 │   ├── display/               # OLED SSD1306 + 菜单 UI + 中文字库
 │   ├── dap/                   # CMSIS-DAP 内核 (ARM DAPLink) + USB 传输 (dap_usb.c)
-│   ├── net/                   # TCP 3333 / HTTP 80 / DAP over TCP 5555 / USB 诊断
+│   ├── net/                   # TCP 3333 / HTTP 80 / WebSocket /ws / DAP 5555 / USB 诊断
 │   ├── serial/                # UART1 桥 + USB-TTL 虚拟串口
 │   ├── swd/                   # SWD bit-bang + TCP 侧 CMSIS-DAP 处理器
 │   └── wifi/                  # WiFi STA/AP 管理
 ├── managed_components/        # 托管组件（CherryUSB 内含 USB 诊断钩子）
 ├── mcp/                       # MCP Server（AI 集成）+ 一键安装脚本
-├── tools/                     # 主机侧辅助脚本（com0com 虚拟串口桥）
+├── tools/                     # 主机侧脚本：com0com 虚拟串口桥 / WebSocket 控制台
 ├── partitions.csv             # 双 OTA 分区表
-├── sdkconfig.defaults         # 默认配置（含 CherryUSB / 控制台 / I2C slave v2）
+├── sdkconfig.defaults         # 默认配置（含 CherryUSB / 控制台 / I2C slave v2 / WebSocket）
 └── CMakeLists.txt
 ```
 
@@ -357,6 +391,8 @@ nexlink/
 | `CONFIG_ESP_CONSOLE_UART_DEFAULT` + `CONFIG_ESP_CONSOLE_SECONDARY_NONE=y` | 让出原生 USB 给 DAP |
 | `CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2=y` | `i2c_mon.c` 用的是 IDF 5.5 的 v2 从机 API |
 | `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` | OTA 崩溃自动回滚 |
+| `CONFIG_HTTPD_WS_SUPPORT=y` | `net/ws_server.c` 编译的前提；关闭时 `esp_http_server.h` 会隐藏全部 `httpd_ws_*` 声明 |
+| `CONFIG_LWIP_MAX_SOCKETS=16` | WebSocket 客户端列表的容量上限 |
 
 根 `CMakeLists.txt` 另需 `add_definitions(-DCONFIG_USBDEV_ADVANCE_DESC=1)`（CherryUSB 高级描述符路径，
 MS OS 描述符靠它才能生成）与 `add_compile_options(-pipe)`（避免临时 `.s` 文件写 `%TEMP%` 失败）。

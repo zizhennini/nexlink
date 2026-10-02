@@ -41,6 +41,7 @@
 #include "oled_ssd1306.h"
 #include "pin_config.h"
 #include "capture.h"
+#include "ws_server.h"
 #include "swd_bridge.h"
 #include "pwm_mon.h"
 #include "spi_mon.h"
@@ -1690,6 +1691,9 @@ static esp_err_t send_api_handler(httpd_req_t *req)
     }
     if (received > 0) {
         serial_bridge_write((uint8_t *)buf, received);
+        /* Mirror our own TX to WebSocket clients so a remote console shows
+         * both directions of the conversation. */
+        ws_broadcast_data(1, (const uint8_t *)buf, (size_t)received);
         /* Echo sent data onto the hardware LCD's RX monitor ('<' prefix) */
         menu_push_tx_data((uint8_t *)buf, received);
     }
@@ -1776,6 +1780,14 @@ esp_err_t http_status_start(void)
     httpd_register_uri_handler(server, &uri_ai_cfg_get);
     httpd_register_uri_handler(server, &uri_ai_cfg_post);
 
-    ESP_LOGI(TAG, "HTTP status page on :80");
+    /* WebSocket shares this server (and therefore port 80). It is started
+     * after the REST routes so an upgrade request can never race the route
+     * table setup, and its failure is not fatal: the polling API still works.
+     * The old upstream ws_server.c was never called from anywhere and stayed
+     * dead code; this one is part of the boot path and reports its state. */
+    if (ws_server_start(server) != ESP_OK)
+        ESP_LOGW(TAG, "WebSocket %s unavailable - REST polling remains", WS_PATH);
+
+    ESP_LOGI(TAG, "HTTP status page on :80 (WebSocket %s)", WS_PATH);
     return ESP_OK;
 }

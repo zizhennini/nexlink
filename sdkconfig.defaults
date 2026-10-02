@@ -52,6 +52,15 @@ CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2=y
 # LWIP sockets
 CONFIG_LWIP_MAX_SOCKETS=16
 
+# --- WebSocket server support (net/ws_server.c) ------------------------------
+# Pushes the UART stream to the browser instead of making it poll /api/data,
+# and carries the reverse commands (send / baud / clear / capture) back over
+# the same socket. Defaults to 'n' in IDF, and when it is off
+# esp_http_server.h hides every httpd_ws_* declaration plus the
+# HTTPD_WS_TYPE_* constants behind an #if - ws_server.c then fails to compile
+# with "unknown type name 'httpd_ws_frame_t'" rather than a helpful error.
+CONFIG_HTTPD_WS_SUPPORT=y
+
 # --- Console: UART0 (IO43 TX / IO44 RX) ---
 # The native USB peripheral (IO19/IO20) is owned by the CMSIS-DAP probe
 # (CherryUSB), so USB-Serial-JTAG can no longer be used for logs.  The

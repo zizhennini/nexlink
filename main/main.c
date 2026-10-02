@@ -26,6 +26,7 @@
 #include "i2c_mon.h"
 #include "buttons.h"
 #include "tcp_server.h"
+#include "ws_server.h"
 #include "dap_server.h"
 #include "dap_usb.h"
 #include "usb_ttl.h"
@@ -55,6 +56,9 @@ const char *main_boot_reason(void)
 static void on_serial_rx(const uint8_t *data, size_t len)
 {
     tcp_server_broadcast(data, len);
+    /* Push to WebSocket clients as it arrives: the browser no longer has to
+     * poll /api/data, and short bursts are no longer coalesced or lost. */
+    ws_broadcast_data(0, data, len);
     menu_push_rx_data(data, len);
 }
 
