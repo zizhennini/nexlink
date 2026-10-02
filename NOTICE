@@ -6,14 +6,26 @@ listed below are either vendored into this repository or pulled in as ESP-IDF
 managed components at build time.
 
 ================================================================================
-1. CMSIS-DAP core  --  main/dap/  (DAP.c, DAP.h, DAP_vendor.c, SW_DP.c)
+1. CMSIS-DAP core  --  main/dap/  (DAP.c, DAP.h, DAP_vendor.c, SW_DP.c,
+                                   JTAG_DP.c)
 ================================================================================
 Origin : ARMmbed DAPLink (https://github.com/ARMmbed/DAPLink)
 Port   : cherry-embedded/CherryDAP (https://github.com/cherry-embedded/CherryDAP)
 License: Apache License 2.0
 
-Files are kept verbatim apart from the PIN_DELAY_SLOW fix documented inline in
-DAP.h; DAP_config.h is NexLink's own board definition.
+DAP.c, DAP.h, DAP_vendor.c and SW_DP.c are kept verbatim apart from the
+PIN_DELAY_SLOW fix documented inline in DAP.h; DAP_config.h is NexLink's own
+board definition.
+
+JTAG_DP.c is taken from the same source (CMSIS-DAP Source, JTAG_DP.c V2.0.0,
+1. December 2017) with one change: the four PIN_TCK_/PIN_TMS_ aliases it defines
+upstream were moved into DAP_config.h, where ARM's reference configurations put
+them.
+
+main/swo_uart.c is NOT taken from DAPLink: ARM's SWO.c depends on a CMSIS
+Driver_USART, which ESP-IDF does not provide. It reimplements the byte source on
+the ESP-IDF UART driver while reproducing the CMSIS-DAP SWO command layer,
+response encoding and error/status semantics of SWO.c V2.0.1 (29. March 2021).
 
 ================================================================================
 2. CherryUSB  --  managed component (cherry-embedded/cherryusb 1.4.3)

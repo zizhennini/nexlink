@@ -2,6 +2,7 @@ idf_component_register(SRCS
                        "main.c"
                        "pin_config.c"
                        "capture.c"
+                       "debug_pins.c"
                        "pwm_mon.c"
                        "spi_mon.c"
                        "i2c_mon.c"
@@ -25,15 +26,21 @@ idf_component_register(SRCS
                        # ARM's DAPLink sources, taken from cherry-embedded/CherryDAP
                        # (Apache-2.0).  Kept verbatim apart from the PIN_DELAY_SLOW
                        # fix documented in dap/DAP.h, and DAP_config.h which is ours.
-                       # Files deliberately omitted, with the switch that disables
-                       # them in dap/DAP_config.h:
-                       #   SWO.c      - SWO_UART 0 / SWO_MANCHESTER 0
+                       # Files deliberately omitted, with the switch that
+                       # disables them in dap/DAP_config.h:
+                       #   SWO.c      - replaced by main/swo_uart.c, because it
+                       #                needs a CMSIS Driver_USART (see below)
                        #   UART.c     - DAP_UART 0
-                       #   JTAG_DP.c  - DAP_JTAG 0
                        "dap/DAP.c"
                        "dap/SW_DP.c"
+                       "dap/JTAG_DP.c"
                        "dap/DAP_vendor.c"
                        "dap/dap_usb.c"
+                       # SWO (ITM trace) capture in UART mode. ARM's SWO.c is
+                       # replaced because it needs a CMSIS Driver_USART, which
+                       # ESP-IDF does not have; the command/response layer is
+                       # reproduced exactly (see the file header).
+                       "swo_uart.c"
                        INCLUDE_DIRS
                        "."
                        "buttons"

@@ -29,6 +29,7 @@
 #include "ws_server.h"
 #include "dap_server.h"
 #include "dap_usb.h"
+#include "debug_pins.h"
 #include "usb_ttl.h"
 #include "http_status.h"
 
@@ -169,6 +170,11 @@ void app_main(void)
         usb_mode = USB_MODE_OFF;
     }
     if (usb_mode == USB_MODE_DAP) {
+        /* Claim the expansion IOs the probe needs for TDI/TDO/nTRST/SWO.
+         * This runs before dap_usb_start() and after the monitors, so a
+         * monitor that was holding one of those IOs is stopped here and the
+         * reason shows up in the log and in /api/status. */
+        debug_pins_init();
         if (dap_usb_start() != ESP_OK) {
             ESP_LOGW(TAG, "USB CMSIS-DAP probe unavailable - SWD over TCP only");
         }

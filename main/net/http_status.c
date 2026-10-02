@@ -41,6 +41,7 @@
 #include "oled_ssd1306.h"
 #include "pin_config.h"
 #include "capture.h"
+#include "debug_pins.h"
 #include "ws_server.h"
 #include "swd_bridge.h"
 #include "pwm_mon.h"
@@ -462,7 +463,13 @@ static esp_err_t status_api_handler(httpd_req_t *req)
     static volatile uint32_t s_api_hits;
     s_api_hits++;
 
-    char json[640];
+    /* Which expansion IOs the debug probe took over. Surfaced so that a
+     * stopped SPI/I2C monitor has a visible cause instead of looking like a
+     * spontaneous failure. */
+    char debug_io[24];
+    debug_pins_report(debug_io, sizeof(debug_io));
+
+    char json[704];
     snprintf(json, sizeof(json),
              "{\"wifi\":\"%s\",\"ip\":\"%s\",\"ssid\":\"%s\",\"rssi\":%d,"
              "\"baud\":%lu,\"rx\":%lu,\"tx\":%lu,"
@@ -470,6 +477,7 @@ static esp_err_t status_api_handler(httpd_req_t *req)
              "\"usbdap\":%d,\"usbmode\":\"%s\",\"usb_ttl\":%d,\"rst\":\"%s\","
              "\"dapcfg\":%lu,\"daprx\":%lu,\"daptx\":%lu,"
              "\"ttl_to_dut\":%lu,\"ttl_to_host\":%lu,"
+             "\"debug\":%d,\"debug_io\":\"%s\","
              "\"slot\":\"%s\",\"ota\":\"%s\"}",
              wstate, ipbuf, ssid, rssi, (unsigned long)baud,
              (unsigned long)serial_bridge_get_rx_count(),
@@ -484,6 +492,7 @@ static esp_err_t status_api_handler(httpd_req_t *req)
              (unsigned long)dap_usb_get_tx_packets(),
              (unsigned long)usb_ttl_get_to_dut(),
              (unsigned long)usb_ttl_get_to_host(),
+             debug_pins_claimed() ? 1 : 0, debug_io,
              run ? run->label : "?", ostate_s);
 
     httpd_resp_set_type(req, "application/json");

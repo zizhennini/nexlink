@@ -64,5 +64,29 @@
 #define PIN_FREE_4           39
 #define PIN_FREE_5           40
 
+/* === Debug probe signals on the expansion header =========================
+ *
+ * NRST / SWCLK / SWDIO have dedicated (non-permutable) pins above, but there
+ * are no dedicated pins left for the rest of the probe, so these four signals
+ * share the expansion IOs. main/debug_pins.c arbitrates: the probe wins, and
+ * any monitor that was using one of these IOs is stopped and reported, so the
+ * trade-off is visible instead of silent (see /api/status "debug_io").
+ *
+ *   TDI    JTAG data in   - bit-banged by the DAP core, needs an output pad
+ *   TDO    JTAG data out  - read-only from our side, needs an input pad
+ *   nTRST  JTAG test reset- driven by DAP_ID_SWJ_Pins
+ *   SWO    trace / ITM    - UART RX; carries the target's SWO output
+ *
+ * IO45 is deliberately left out of this set: it is the VDD_SPI strapping pin,
+ * and a debug signal would sit on it during every reset.
+ *
+ * JTAG and SWO are useful together (SWO gives you printf while JTAG drives the
+ * core), which is why all four are wired even though a pure-SWD workflow only
+ * needs the dedicated three. */
+#define PIN_DEBUG_TDI        48   /* expansion IO */
+#define PIN_DEBUG_TDO        38   /* expansion IO */
+#define PIN_DEBUG_NTRST      39   /* expansion IO */
+#define PIN_DEBUG_SWO        40   /* expansion IO */
+
 /* === USB (native OTG, fixed pins, driven by the USB peripheral) === */
 /* IO19 = USB_DM, IO20 = USB_DP - never configure these as plain GPIO. */

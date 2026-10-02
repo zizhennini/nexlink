@@ -71,11 +71,17 @@
 /// Serial Wire Debug is the whole point of this build.
 #define DAP_SWD                 1
 
-/// JTAG is not wired up: the board only exposes SWCLK / SWDIO / nRESET.
-/// Turning this off also removes the DAP_JTAG_* command handlers, which keeps
-/// the unused PIN_TDI_* / PIN_TDO_IN paths out of the firmware.
-#define DAP_JTAG                0
-#define DAP_JTAG_DEV_CNT        0U
+/// JTAG is supported in addition to SWD. TCK/TMS are the same pads as
+/// SWCLK/SWDIO (as on any SWJ-DP target); TDI/TDO/nTRST come from the
+/// expansion header, since the board has no spare dedicated pins for them.
+/// The host chooses the port at runtime with DAP_Connect (DAP_PORT_SWD or
+/// DAP_PORT_JTAG), so enabling this costs nothing for an SWD-only session.
+///
+/// DAP_JTAG_DEV_CNT is the length of the multi-device scan-chain descriptor:
+/// 1..8 entries for DAP_JTAG_Configure. Keep it small - each entry is 6 bytes
+/// of DAP_Info state that most hosts never use.
+#define DAP_JTAG                1
+#define DAP_JTAG_DEV_CNT        4U
 
 /// Port selected by DAP_Connect when the host asks for "default".
 #define DAP_DEFAULT_PORT        DAP_PORT_SWD
@@ -93,11 +99,27 @@
 /// One packet is enough: the transport queues packets on the host side.
 #define DAP_PACKET_COUNT        1U
 
-/// SWO / trace: not implemented.
-#define SWO_UART                0
+/// SWO / trace: UART (asynchronous) mode, implemented on an ESP32-S3 UART.
+///
+/// The target's SWO pin is a single wire carrying UART-framed ITM data, so the
+/// host asks for DAP_SWO_UART and this side just needs a UART RX. Manchester
+/// mode is not offered - it would need the RMT peripheral and ASYNC mode is
+/// what every current debug probe uses anyway.
+///
+/// SWO_UART_DRIVER selects the CMSIS USART instance in ARM's SWO.c; here it
+/// selects the ESP32 UART port number (see main/swo_uart.c). UART2 is free:
+/// UART0 is the console and UART1 is the DUT bridge.
+#define SWO_UART                1
+#define SWO_UART_DRIVER         2
+/// The SWO wire is on the expansion header (PIN_DEBUG_SWO in pinout.h) because
+/// the dedicated pins are fully used; debug_pins.c arbitrates ownership.
+#define SWO_UART_MAX_BAUDRATE   4000000U
 #define SWO_MANCHESTER          0
+/// Streaming trace (bulk endpoint) is off: the host polls ID_DAP_SWO_Data,
+/// which is what pyOCD/OpenOCD do for SWO.
 #define SWO_STREAM              0
-#define SWO_BUFFER_SIZE         0U
+/// Must stay a power of two (the index arithmetic relies on it).
+#define SWO_BUFFER_SIZE         4096U
 
 /// Timestamp domain.  esp_timer_get_time() already returns microseconds, which
 /// is exactly what the host expects for the DAP_SWJ_Pins wait and for
@@ -207,7 +229,11 @@ which is exactly the SWDIO turnaround the CMSIS-DAP I/O layer expects.
 #define DAP_GPIO_GET(n)     (((n) < 32) ? ((REG_READ(GPIO_IN_REG)  >> ((n) & 31U)) & 1UL)          \
                                         : ((REG_READ(GPIO_IN1_REG) >> ((n) & 31U)) & 1UL))
 
-/* Configure the three debug pads once.  Safe to call repeatedly. */
+/* Configure the debug pads once.  Safe to call repeatedly.
+ *
+ * SWCLK/SWDIO/nRESET are dedicated pins; TDI/TDO/nTRST come from the expansion
+ * header (see pinout.h). All six are set to input+output up front so direction
+ * can be flipped with the single output-enable bit, exactly like SWDIO. */
 __STATIC_INLINE void dap_pads_init(void)
 {
     static int done = 0;
@@ -217,7 +243,10 @@ __STATIC_INLINE void dap_pads_init(void)
     done = 1;
 
     gpio_config_t io = {
-        .pin_bit_mask = (1ULL << PIN_SWD_SWCLK) | (1ULL << PIN_SWD_SWDIO) | (1ULL << PIN_SWD_NRST),
+        .pin_bit_mask = (1ULL << PIN_SWD_SWCLK) | (1ULL << PIN_SWD_SWDIO) |
+                        (1ULL << PIN_SWD_NRST)  |
+                        (1ULL << PIN_DEBUG_TDI) | (1ULL << PIN_DEBUG_TDO) |
+                        (1ULL << PIN_DEBUG_NTRST),
         .mode         = GPIO_MODE_INPUT_OUTPUT,
         .pull_up_en   = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -226,23 +255,35 @@ __STATIC_INLINE void dap_pads_init(void)
     gpio_config(&io);
 
     /* Idle state: both debug lines high, output drivers on (SWD uses a
-     * pull-up on SWDIO and SWCLK idles high), nRESET released (high). */
+     * pull-up on SWDIO and SWCLK idles high), nRESET released (high).
+     * TDI and nTRST idle high as well; nTRST is asserted low by the host. */
     DAP_GPIO_SET(PIN_SWD_SWCLK);
     DAP_GPIO_SET(PIN_SWD_SWDIO);
     DAP_GPIO_SET(PIN_SWD_NRST);
+    DAP_GPIO_SET(PIN_DEBUG_TDI);
+    DAP_GPIO_SET(PIN_DEBUG_NTRST);
+
+    /* TDO is driven by the target, so our output driver stays off; the pad is
+     * still configured as input+output so DAP_GPIO_GET() can read it. */
+    DAP_GPIO_OE_CLR(PIN_DEBUG_TDO);
 }
 
-/** Setup JTAG I/O pins -- JTAG is not wired on this board, so this is the same
-    as the SWD setup minus the JTAG-only pads. */
+/** Setup JTAG I/O pins: TCK/TMS/TDI/nTRST as outputs driving high, TDO as
+    input. PCI (device index) is handled by the DAP core over the same pins. */
 __STATIC_INLINE void PORT_JTAG_SETUP(void)
 {
     dap_pads_init();
     DAP_GPIO_SET(PIN_SWD_SWCLK);
     DAP_GPIO_SET(PIN_SWD_SWDIO);
+    DAP_GPIO_SET(PIN_DEBUG_TDI);
+    DAP_GPIO_SET(PIN_DEBUG_NTRST);
     /* Re-enable the drivers: PORT_OFF() tri-states the pads and dap_pads_init()
        is latched, so without this a later DAP_Connect() leaves the lines dead. */
     DAP_GPIO_OE_SET(PIN_SWD_SWCLK);
     DAP_GPIO_OE_SET(PIN_SWD_SWDIO);
+    DAP_GPIO_OE_SET(PIN_DEBUG_TDI);
+    DAP_GPIO_OE_SET(PIN_DEBUG_NTRST);
+    DAP_GPIO_OE_CLR(PIN_DEBUG_TDO);
 }
 
 /** Setup SWD I/O pins: SWCLK, SWDIO and nRESET, all driving high. */
@@ -266,6 +307,9 @@ __STATIC_INLINE void PORT_OFF(void)
     DAP_GPIO_OE_CLR(PIN_SWD_SWCLK);
     DAP_GPIO_OE_CLR(PIN_SWD_SWDIO);
     DAP_GPIO_OE_CLR(PIN_SWD_NRST);
+    DAP_GPIO_OE_CLR(PIN_DEBUG_TDI);
+    DAP_GPIO_OE_CLR(PIN_DEBUG_NTRST);
+    /* TDO is never driven by us, so there is nothing to release. */
 }
 
 /* --- SWCLK / TCK -------------------------------------------------------- */
@@ -279,6 +323,15 @@ __STATIC_INLINE void     PIN_SWCLK_TCK_CLR(void)  { DAP_GPIO_CLR(PIN_SWD_SWCLK);
 __STATIC_INLINE uint32_t PIN_SWDIO_TMS_IN(void)   { return DAP_GPIO_GET(PIN_SWD_SWDIO); }
 __STATIC_INLINE void     PIN_SWDIO_TMS_SET(void)  { DAP_GPIO_SET(PIN_SWD_SWDIO); }
 __STATIC_INLINE void     PIN_SWDIO_TMS_CLR(void)  { DAP_GPIO_CLR(PIN_SWD_SWDIO); }
+
+/* TCK and TMS are the JTAG names of the very same two pads. ARM's reference
+ * DAP_config.h files define these aliases, and JTAG_DP.c calls them; SW_DP.c
+ * only ever uses the SWD spellings, which is why they could be missing until
+ * JTAG was enabled. */
+#define PIN_TCK_SET  PIN_SWCLK_TCK_SET
+#define PIN_TCK_CLR  PIN_SWCLK_TCK_CLR
+#define PIN_TMS_SET  PIN_SWDIO_TMS_SET
+#define PIN_TMS_CLR  PIN_SWDIO_TMS_CLR
 
 __STATIC_INLINE uint32_t PIN_SWDIO_IN(void)
 {
@@ -304,13 +357,23 @@ __STATIC_INLINE void PIN_SWDIO_OUT_DISABLE(void)
     DAP_GPIO_OE_CLR(PIN_SWD_SWDIO);
 }
 
-/* --- TDI / TDO / nTRST: not wired, JTAG is compiled out ----------------- */
+/* --- JTAG port: TDI / TDO / nTRST on the expansion header ---------------
+ *
+ * These three are the only DAP signals not on a dedicated pin; they share the
+ * expansion IOs and main/debug_pins.c takes them over at boot. The DAP core
+ * bit-bangs TDI and samples TDO inside JTAG_Sequence / JTAG_Transfer, so these
+ * have to be plain, fast GPIO accesses - same contract as SWCLK/SWDIO above.
+ *
+ * TDO is input-only from this side: the target drives it.
+ * nTRST is driven (and read back) by DAP_ID_SWJ_Pins; on a target without a
+ * JTAG reset pin, leaving it unconnected is harmless.
+ */
 
-__STATIC_INLINE uint32_t PIN_TDI_IN(void)         { return 0U; }
-__STATIC_INLINE void     PIN_TDI_OUT(uint32_t bit){ (void)bit; }
-__STATIC_INLINE uint32_t PIN_TDO_IN(void)         { return 0U; }
-__STATIC_INLINE uint32_t PIN_nTRST_IN(void)       { return 0U; }
-__STATIC_INLINE void     PIN_nTRST_OUT(uint32_t bit) { (void)bit; }
+__STATIC_INLINE uint32_t PIN_TDI_IN(void)         { return DAP_GPIO_GET(PIN_DEBUG_TDI); }
+__STATIC_INLINE void     PIN_TDI_OUT(uint32_t bit){ if (bit & 1U) DAP_GPIO_SET(PIN_DEBUG_TDI); else DAP_GPIO_CLR(PIN_DEBUG_TDI); }
+__STATIC_INLINE uint32_t PIN_TDO_IN(void)         { return DAP_GPIO_GET(PIN_DEBUG_TDO); }
+__STATIC_INLINE uint32_t PIN_nTRST_IN(void)       { return DAP_GPIO_GET(PIN_DEBUG_NTRST); }
+__STATIC_INLINE void     PIN_nTRST_OUT(uint32_t bit) { if (bit & 1U) DAP_GPIO_SET(PIN_DEBUG_NTRST); else DAP_GPIO_CLR(PIN_DEBUG_NTRST); }
 
 /* --- nRESET: real, on PIN_SWD_NRST -------------------------------------- */
 

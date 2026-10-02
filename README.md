@@ -65,6 +65,8 @@ SPI/I2C/PWM 协议分析仪、以及让 AI 直接操控硬件的 MCP 接口。
 | **SPI** | 默认作 SPI 从机实时抓包（MOSI/MISO/CS），可切主机主动发送（两者互斥，自动切换） |
 | **I2C** | 从机模式（默认地址 0x50，可靠 ACK 抓写）或 RMT 被动嗅探（监听外部主机↔从机） |
 | **SWD** | GPIO bit-bang + TCP 侧 CMSIS-DAP 处理器（读 IDCODE 等） |
+| **JTAG** | DAPLink 内核原生支持（`main/dap/JTAG_DP.c`），覆盖 RISC-V / FPGA / 菊花链 |
+| **SWO / ITM** | 单线跟踪，目标的 `printf` 经 UART 模式接收（4 KB 环形缓冲，最高 4 Mbaud） |
 
 ### 🖥️ OLED 菜单（SSD1306 128×64，I2C）
 
@@ -145,7 +147,7 @@ python tools/ws_console.py --host <IP> --raw > log.bin # 只导出目标板数�
 |------|------|
 | `GET /api/usbtrace` | 每条 SETUP 报文 + 结果（ok/STALL）+ EP0 分包事件 |
 | `GET /api/usbdesc` | 设备真实发出的描述符字节 |
-| `GET /api/status` | `dapcfg`（主机是否完成配置）、`daprx`/`daptx`（命令/响应计数）、`rst`、`slot`、`ota` |
+| `GET /api/status` | `dapcfg`（主机是否完成配置）、`daprx`/`daptx`（命令/响应计数）、`rst`、`slot`、`ota`、`debug`/`debug_io`（调试引脚占用） |
 
 跑 Keil/pyOCD 时 `daprx`/`daptx` 应同步增长；命令/响应配对即 SWD 链路正常。
 
@@ -182,9 +184,53 @@ python tools/ws_console.py --host <IP> --raw > log.bin # 只导出目标板数�
 | **SCL / SDA** | IO10 / IO11 | I2C0，与 OLED 共用总线；可嗅探外部 I2C |
 | **NRST** | IO12 | 目标复位（`/api/dut/reset`） |
 | **SWCLK / SWDIO** | IO13 / IO14 | **CMSIS-DAP 探针**（`dap` 模式） |
-| **拓展 IO ×5** | IO48 / IO45 / IO38 / IO39 / IO40 | 协议可排列：`PWM / GPIO / SCK / MOSI / MISO / CS / SDA / SCL` |
+| **TDI / TDO / nTRST** | IO48 / IO38 / IO39 | **JTAG 调试**（探针独占，见下） |
+| **SWO** | IO40 | **ITM 跟踪**（目标 printf 单向输出到主机） |
+| **拓展 IO** | IO45（剩 1 个） | 协议可排列：`PWM / GPIO / SCK / MOSI / MISO / CS / SDA / SCL` |
 
-引脚真源是 [`main/pinout.h`](main/pinout.h)。
+### JTAG 与 SWO 的引脚占用（重要）
+
+板子只剩 5 个拓展 IO，而调试探针除了 SWD 的三根专用线之外还需要四根信号线，
+它们和 SPI/I2C 协议分析抢同一批拓展 IO：
+
+| 信号 | 占用 | 用途 |
+|------|------|------|
+| TDI | IO48 | JTAG 数据输入（DAP 内核位翻转输出） |
+| TDO | IO38 | JTAG 数据输出（目标驱动，只读） |
+| nTRST | IO39 | JTAG 测试复位 |
+| SWO | IO40 | ITM 跟踪，UART 方式接收 |
+
+**仲裁规则**：探针优先。启动时（`dap` 模式）[`main/debug_pins.c`](main/debug_pins.c) 接管这四个 IO，
+如果某个监控（SPI 抓包 / I2C 嗅探）正占着其中一个，**该监控会被停止并在日志与 `/api/status` 里说明原因**
+（`debug` / `debug_io` 两个字段），不会静默失效。
+
+所以实际可用的协议排列只剩 **IO45 一个槽位**。这是一次明确的取舍：
+要么要 JTAG + SWO + 一个协议通道，要么要完整的 SPI+I2C 排列。
+不用 JTAG/SWO 时把 USB 角色切回 `off` 或 `ttl`，四个 IO 就都还给协议排列。
+
+> IO45 被刻意排除在调试信号之外：它是 VDD_SPI 的 strapping 引脚，
+> 不该有任何调试信号在每次复位时挂在上面。
+
+### JTAG 支持
+
+MCU 用的是真 DAPLink 内核（`main/dap/JTAG_DP.c`，ARM Apache-2.0 源码），
+所以主机侧无需区分——Keil / pyOCD / OpenOCD 通过 `DAP_Connect` 选择 `DAP_PORT_JTAG` 即可。
+
+JTAG 的价值在于覆盖 SWD 覆盖不到的目标：**RISC-V**（ESP32-C3/C6、GD32VF103）、
+**FPGA 配置口**、以及**多器件菊花链**（`DAP_JTAG_DEV_CNT` 支持最多 4 个器件）。
+
+### SWO / ITM 单线跟踪
+
+目标的 `ITM_SendChar()` 输出通过单根 SWO 线送到主机，不用额外接 UART：
+
+- **模式**：UART（异步）。Manchester 模式未启用——它需要 RMT 外设，且现在所有探针都用 UART 模式
+- **速率**：主机通过 `DAP_SWO_Baudrate` 设置，上限 4 Mbaud
+- **缓冲**：4 KB 环形缓冲，写满时**丢最旧**而不是停止采集
+- **实现**：[`main/swo_uart.c`](main/swo_uart.c)。ARM 原版 `SWO.c` 依赖 CMSIS `Driver_USART`（ESP-IDF 没有），
+  所以按 ESP-IDF UART 驱动重写了字节来源，**命令层、响应编码、错误位语义与 ARM v2.0.1 完全一致**
+- 溢出通过标准的 `DAP_SWO_BUFFER_OVERRUN` 状态位上报，主机的既有判断逻辑无需改动
+
+在 IDE 里这样用：Keil 勾选 *Trace → SWO*；pyOCD 用 `--swo`；OpenOCD 配 `cmsis_dap` 的 SWO 通道。
 
 ### ⚡ 逻辑电平警告
 
@@ -200,10 +246,13 @@ python tools/ws_console.py --host <IP> --raw > log.bin # 只导出目标板数�
 ### 引脚配置的真实含义
 
 拓展 IO 的**协议功能可排列并持久化到 NVS**，但 **IO 号本身不可改**——
-改的是那 5 个固定 IO（IO48/IO45/IO38/IO39/IO40）上各自承载哪种协议。
+改的是拓展 IO（IO48/IO45/IO38/IO39/IO40）上各自承载哪种协议。
 Web 页、OLED Config 页或 MCP 的 `set_pins` 都能改，自动交换、拒绝非法排列。
 
+引脚真源是 [`main/pinout.h`](main/pinout.h)。
+
 > `IO45` 同时是 strapping 引脚（VDD_SPI），复位瞬间被外部拉低可能影响启动模式。
+> 它也是**唯一没有分配给调试探针**的拓展 IO。
 
 ### 不可用的 IO
 
@@ -347,8 +396,10 @@ nexlink/
 ├── main/
 │   ├── main.c                 # 入口：启动链 + USB 安全模式守卫 + OTA 健康检查
 │   ├── pinout.h               # ★ 引脚真源
-│   ├── pin_config.c/h         # 5 个自由 IO 的协议排列 + USB 角色持久化 (NVS)
+│   ├── pin_config.c/h         # 拓展 IO 的协议排列 + USB 角色持久化 (NVS)
 │   ├── capture.c/h            # 带时间戳与方向的抓包环形缓冲
+│   ├── debug_pins.c/h         # 调试探针对拓展 IO 的归属仲裁 (TDI/TDO/nTRST/SWO)
+│   ├── swo_uart.c             # SWO/ITM 跟踪（UART 模式，替换 ARM 的 SWO.c）
 │   ├── pwm_mon.c/h            # PWM 测量 (RMT) + LEDC 输出
 │   ├── spi_mon.c/h            # SPI 从机抓包 / 主机发送
 │   ├── i2c_mon.c/h            # I2C 从机抓包 / RMT 被动嗅探
@@ -417,10 +468,25 @@ Windows 会把"此设备没有 OS 描述符"的结论按 `HKLM\SYSTEM\CurrentCon
 
 **4. 确认探针真的在工作**
 `/api/status` 的 `dapcfg ≥ 1` 表示主机已完成配置；跑 Keil/pyOCD 时 `daprx`/`daptx` 应同步增长。
+`debug` / `debug_io` 显示调试探针占用了哪些拓展 IO。
+
+### JTAG / SWO 相关
+
+**5. 切到 JTAG 后目标连不上**
+确认目标的 TDI/TDO/nTRST 已接到 IO48/IO38/IO39，且 `dap` 模式下 `/api/status` 的 `debug=1`。
+JTAG 需要 TCK/TMS/TDI/TDO 四线（TCK/TMS 复用 SWCLK/SWDIO）；nTRST 在多数目标上可以不接。
+
+**6. 切到 JTAG 后 SPI 抓包 / I2C 嗅探停了**
+这是预期行为：调试探针接管 IO48/IO38/IO39/IO40，日志与 `/api/status` 会写明是哪个监控被停止。
+把 USB 角色切回 `off` / `ttl` 即可让这些 IO 回到协议排列。
+
+**7. IDE 里看不到 SWO 输出**
+依次确认：目标已使能 ITM 且 SWO 引脚接到了 IO40；IDE 的 trace 时钟与目标 CPU 一致；
+速率不超过 4 Mbaud。目标侧 `TRACE_CR` 没使能时不会产生任何数据，宿主侧看起来就像"毫无反应"。
 
 ### 网络与串口
 
-**5. 连不上 WiFi** — 检查密码与信号；若设备进了 AP 模式，重连 `NexLink-xxxx` 重新配网。
+**8. 连不上 WiFi** — 检查密码与信号；若设备进了 AP 模式，重连 `NexLink-xxxx` 重新配网。
 
 **6. 串口无数据** — 核对波特率（`/api/status` 可查当前值）、确认 TX/RX 交叉接线、确认目标板有输出。
 
