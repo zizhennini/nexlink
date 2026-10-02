@@ -88,13 +88,13 @@ extern uint32_t    dap_usb_get_tx_packets(void);
 /*  adds up to 64 exactly and every band is as tall as what it holds.    */
 /* ------------------------------------------------------------------ */
 
-#define ROW_TITLE_Y   0
-#define TITLE_H       16
-#define ROW_ITEM_Y    TITLE_H       /* first item row                    */
-#define ITEM_PITCH    16            /* one full font cell per entry      */
-#define ITEM_ROWS     2             /* 16 + 2*16 = 48, status row at 48  */
-#define ROW_STATUS_Y  48            /* the fourth and last row           */
-#define TEXT_COLS     16            /* 128 / 8 */
+#define ROW_TITLE_Y   4            /* compact header: small face, centred   */
+#define TITLE_H       14
+#define ROW_ITEM_Y    16           /* first item row                       */
+#define ITEM_PITCH    16           /* one full row per entry               */
+#define ITEM_ROWS     3            /* 3 x 16 = 48; 48 + 16 = 64 exactly    */
+#define ROW_STATUS_Y  48           /* only used by the value editor        */
+#define TEXT_COLS     16           /* 128 / 8 */
 
 /* ------------------------------------------------------------------ */
 /*  Menu table types                                                   */
@@ -220,72 +220,69 @@ static void small_str(int x, int y, const char *s, bool inverted)
     }
 }
 
+/* Small face at an integer scale, used for the compact header wordmark. */
+static void small_str_scaled(int x, int y, const char *s, int scale)
+{
+    const int adv = (UI_FONT_W + 1) * scale;
+    for (; *s; s++) {
+        unsigned char ch = (unsigned char)*s;
+        if (ch < UI_FONT_FIRST || ch > UI_FONT_LAST) ch = '?';
+        const uint8_t *g = ui_font5x7[ch - UI_FONT_FIRST];
+        for (int r = 0; r < UI_FONT_H; r++) {
+            for (int c = 0; c < UI_FONT_W; c++) {
+                if (!((g[r] >> (7 - c)) & 1)) continue;
+                for (int sy = 0; sy < scale; sy++)
+                    for (int sx = 0; sx < scale; sx++)
+                        oled_pixel(x + c * scale + sx, y + r * scale + sy, true);
+            }
+        }
+        x += adv;
+    }
+}
+
 #define SMALL_LINE_H 16                     /* the row band, not the glyph */
 
-/* One list row: 16x16 icon, then small text, both centred in a full 16px band
- * so the icon can never extend past the strip that was cleared for it. */
-#define LIST_ICON_X   2
+/* One list row: selection marker, icon, then small text. There is
+ * deliberately NO highlight band - the marker alone says which row is
+ * selected, which keeps the list calm to look at and leaves the text at full
+ * contrast whether or not it is the current row. */
+#define MARK_X        1
+#define LIST_ICON_X   7
 #define LIST_TEXT_X   (LIST_ICON_X + 16 + 2)
 
 static void list_row(int y, const uint8_t *icon, const char *label, bool selected)
 {
-    /* Clear the whole 16px band first. The selection band is a plain fill, so
-     * a previous longer label would otherwise leave its tail behind - text on
-     * top of text, which is what "overlapping" looked like. */
     oled_fill_rect(0, y, OLED_WIDTH, SMALL_LINE_H, false);
-    if (selected) oled_fill_rect(0, y, OLED_WIDTH, SMALL_LINE_H, true);
-    if (icon) oled_bitmap(LIST_ICON_X, y, 16, 16, icon, selected);
-    /* 7px glyph centred in the 16px band: (16 - 7) / 2 = 4.5 -> 5 */
-    small_str(LIST_TEXT_X, y + 5, label, selected);
+    if (selected) {
+        /* A small right-pointing triangle: the conventional "you are here"
+         * marker, drawn instead of an inverted band. */
+        oled_hline(MARK_X, MARK_X + 2, y + 8, true);
+        oled_hline(MARK_X, MARK_X + 1, y + 7, true);
+        oled_hline(MARK_X, MARK_X + 1, y + 9, true);
+        oled_pixel(MARK_X, y + 8, true);
+    }
+    if (icon) oled_bitmap(LIST_ICON_X, y, 16, 16, icon, false);
+    small_str(LIST_TEXT_X, y + 5, label, false);
 }
 
 static void title_row(const char *title)
 {
-    /* Header = inverted bar with rounded ends + a separator line under it.
-     * That single visual difference is what makes a list read as a list rather
-     * than as four identical lines of text. (The reference OLED menus all do
-     * some form of this.) The text is drawn once, normally, and inverted - a
-     * faked "bigger" font by drawing the glyph twice would clip the descenders
-     * against the 16px row. */
-    char line[TEXT_COLS + 1];
-    snprintf(line, sizeof(line), "%-*.*s", TEXT_COLS, TEXT_COLS, title);
+    /* Compact centred wordmark in the SMALL face. The header is deliberately
+     * smaller than the list rows rather than larger: an inverted or scaled-up
+     * header is itself a form of highlighting, and the request was for a calm,
+     * unhighlighted screen. A thin rule under it is enough to separate the two
+     * regions without shouting. */
+    oled_fill_rect(0, 0, OLED_WIDTH, TITLE_H, false);
 
-    oled_fill_rect(0, 0, OLED_WIDTH, 16, true);
-    oled_text(0, 0, line, true);
+    int w = (int)strlen(title) * (UI_FONT_W + 1) - 1;
+    int x = (OLED_WIDTH - w) / 2;
+    if (x < 0) x = 0;
+    small_str_scaled(x, ROW_TITLE_Y, title, 1);
 
-    /* Round the four corners back off so the bar is not a plain rectangle. */
-    oled_pixel(0, 0, false);
-    oled_pixel(1, 0, false);
-    oled_pixel(0, 1, false);
-    oled_pixel(0, 15, false);
-    oled_pixel(1, 15, false);
-    oled_pixel(0, 14, false);
-    oled_pixel(OLED_WIDTH - 1, 0, false);
-    oled_pixel(OLED_WIDTH - 2, 0, false);
-    oled_pixel(OLED_WIDTH - 1, 1, false);
-    oled_pixel(OLED_WIDTH - 1, 15, false);
-    oled_pixel(OLED_WIDTH - 2, 15, false);
-    oled_pixel(OLED_WIDTH - 1, 14, false);
-
-    oled_hline(0, 15, OLED_WIDTH, true);
+    oled_hline(0, ROW_TITLE_Y + UI_FONT_H + 2, OLED_WIDTH, true);
 }
 
-/* Vertical scroll indicator in the 7px right margin. Drawn only when the list
- * does not fit, which is how the user learns there is more above/below without
- * any text telling them. (3px-wide thumb, as in the reference OLED menus.) */
-static void scrollbar(int total, int window, int first, int y0, int h)
-{
-    if (total <= window) return;
-    const int x = OLED_WIDTH - 4;
-    oled_vline(x, y0, h, false);            /* clear the track */
-    int thumb_h = h * window / total;
-    if (thumb_h < 4) thumb_h = 4;
-    int span = h - thumb_h;
-    int max_first = total - window;
-    int thumb_y = y0 + (max_first ? span * first / max_first : 0);
-    oled_fill_rect(x, thumb_y, 3, thumb_h, true);
-}
-
+/* One list row: selection marker, icon, then small text. */
 static void open_menu(const menu_def_t *m, int page)
 {
     s_menu = m;
@@ -610,18 +607,22 @@ static const menu_def_t menu_prb  = { "Probe",   probe_items,icons_prb,  7, prob
 static const menu_def_t menu_sys  = { "System",  sys_items,  icons_sys,  8, sys_dispatch,  sys_edit };
 static const menu_def_t menu_inf  = { "Info",    info_items, icons_inf,  6, info_dispatch, NULL };
 
-/* "Back" from a nested list returns to the root. Only one level of nesting
- * exists, so this needs no stack: the parent is always the root list. */
+/* The root entry that opened the current group. Selecting "Back" returns the
+ * cursor there instead of resetting to the top, so leaving a group does not
+ * lose the user's place in the list above it. */
+static int s_parent_entry;
+
 static void go_back(void)
 {
     s_menu = &menu_root;
-    s_cursor = 0;
+    s_cursor = s_parent_entry;
     s_screen = SCREEN_LIST;
     s_page = MENU_HOME;
 }
 
 static void root_dispatch(int sel)
 {
+    s_parent_entry = sel;              /* remember for the "Back" return */
     switch (sel) {
     case 0: open_menu(&menu_mon, MENU_LIST_MONITOR); break;
     case 1: open_menu(&menu_prb, MENU_LIST_PROBE);   break;
@@ -867,23 +868,17 @@ static void render_list(void)
         list_row(y, ic, s_menu->items[idx], idx == s_cursor);
     }
 
-    /* Scroll indicator instead of a textual hint: it says "there is more" in
-     * the same way every other graphical list does, without spending a row. */
-    scrollbar(s_menu->count, ITEM_ROWS, first, ROW_ITEM_Y, ITEM_ROWS * ITEM_PITCH);
+    /* No scroll indicator and no page counter: the request was to drop them and
+     * let the list simply scroll. Instead the window keeps one row of context
+     * above and below the cursor where the list allows it, so moving feels like
+     * scrolling through a continuous list rather than paging between blocks. */
 
-    /* Status row carries INFORMATION, never a restatement of the key map. An
-     * earlier revision printed "SW2=ok" here, which told the user nothing they
-     * could act on and made the screen look like a debug dump. */
-    char hint[32];
+    /* Status row: ONLY the value editor. A plain list shows nothing here, which
+     * is what removes the "1 / 7" style counter from every screen. */
     if (s_menu->adjust && s_cursor >= 1) {
-        /* Highlighted entry is adjustable: show its live value. */
+        char hint[32];
         s_menu->adjust(0);              /* seed the editor from live state */
         snprintf(hint, sizeof(hint), "%d %s", s_ed_show, s_ed_unit);
-        row_text(ROW_STATUS_Y, hint, true);
-    } else if (s_menu->count > ITEM_ROWS) {
-        /* Only when the list is longer than the window is the position worth a
-         * row; a short list shows nothing rather than noise. */
-        snprintf(hint, sizeof(hint), "%d / %d", s_cursor + 1, s_menu->count);
         row_text(ROW_STATUS_Y, hint, false);
     } else {
         row_clear(ROW_STATUS_Y);

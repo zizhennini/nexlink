@@ -206,7 +206,14 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(1200));
     }
 
-    xTaskCreate(ui_task, "ui", 8192, NULL, 5, NULL);
+    /* The panel task runs one notch BELOW the HTTP server, which IDF also
+     * creates at priority 5. oled_flush() writes the whole 1 KB framebuffer
+     * over I2C in one synchronous burst (~25 ms at 400 kHz) on every key
+     * press, and at equal priority that burst competes with request handling -
+     * which showed up as intermittent /api/btn and /api/status timeouts when
+     * navigating. A panel refresh has a soft deadline; an HTTP request does
+     * not, so the renderer yields. */
+    xTaskCreate(ui_task, "ui", 8192, NULL, 4, NULL);
 
     ESP_LOGI(TAG, "All subsystems initialized");
     ESP_LOGI(TAG, "HTTP: http://<ip>:80  TCP: tcp://<ip>:3333");
