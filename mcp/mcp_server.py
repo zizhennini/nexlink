@@ -554,6 +554,8 @@ def device_status() -> str:
         f"抓包: {cap.get('count', 0)}/{cap.get('cap', 0)} 条, seq {cap.get('oldest', 0)}..{cap.get('next', 0)}"
         + ("（已回绕，早期数据被覆盖）" if cap.get("dropped") else ""),
         f"DAP TCP: :5555 (NexLink CMSIS-DAP 原始 TCP 通道，标准工具链请用 USB dap 模式)",
+        f"调试探针占用拓展 IO: {s.get('debug_io', 'none') if s.get('debug') else '未占用（JTAG/SWO 不可用）'}",
+        f"USB 角色: {s.get('usbmode', '?')}  主机已配置: {'是' if s.get('dapcfg') else '否'}",
         "",
         "引脚分配:",
     ]

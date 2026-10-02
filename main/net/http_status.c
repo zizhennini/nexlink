@@ -561,9 +561,13 @@ static esp_err_t btn_api_handler(httpd_req_t *req)
 /*  Clients page with the returned "next" value; if it lags the        */
 /*  current "next" the log overflowed and older chunks are gone.       */
 /* ------------------------------------------------------------------ */
-#define CAP_BATCH   64
-#define CAP_CSV_MAX 96
-#define CAP_HEX_MAX 48
+#define CAP_BATCH     64
+#define CAP_CSV_MAX   96
+/* Hex mode carries two characters per payload byte, so the same number of
+ * chunks produces a response roughly twice as large as text mode; the batch is
+ * capped lower for that reason. This is a batch limit, NOT a buffer size - the
+ * hex scratch buffer is sized from the payload maximum (CAP_HEX_BUF). */
+#define CAP_HEX_BATCH 48
 /* A chunk's payload is at most CAPTURE_PAYLOAD_MAX bytes, so its hex form is at
  * most 2x that plus termination: sizing it here means the hex branch can never
  * silently emit a short string. */
@@ -594,7 +598,7 @@ static esp_err_t capture_get_handler(httpd_req_t *req)
     bool want_hex = !strcasecmp(p_fmt, "hex");
     bool meta_only = !strcasecmp(p_want, "meta");
     if (want_csv && req_max > CAP_CSV_MAX) req_max = CAP_CSV_MAX;
-    if (want_hex && req_max > CAP_HEX_MAX) req_max = CAP_HEX_MAX;
+    if (want_hex && req_max > CAP_HEX_BATCH) req_max = CAP_HEX_BATCH;
 
     uint32_t since = (uint32_t)strtoul(p_since, NULL, 10);
     uint32_t next = since;

@@ -93,6 +93,8 @@ RX Monitor · I2C Bus · SPI Bus · PWM · SWD/DAP · Status · Config · AI/MCP
 - 默认 **256 条 / ≈35 KB**，写满后自动覆盖最旧的（`dropped` 标志会告诉你）
 - 可通过 `?since=` 游标**反复分页读取同一段历史**，不是破坏性读取
 - 导出 CSV：`seq,uptime_ms,delta_ms,dir,len,data`，`delta_ms` 直接给出报文的相对间隔
+- **单次响应有界**：JSON 一次最多 64 条（`?fmt=hex` 为 48 条），避免把大数组拼在 httpd 栈上；
+  若本次被裁剪，响应里会多出一个 `{"cut":true}`，客户端据此继续跟随 `next` 而不是误判为日志末尾
 
 ```bash
 # 看最近 32 条（文本）
