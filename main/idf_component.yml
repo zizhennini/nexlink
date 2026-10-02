@@ -1,0 +1,11 @@
+## Managed components for the nexlink main component.
+dependencies:
+  espressif/cjson:
+    version: "~1.7.15"
+
+  # USB device stack used by the CMSIS-DAP probe.  The DAP core (main/dap/) is
+  # ARM's DAPLink source, which knows nothing about USB; CherryUSB provides the
+  # WinUSB-facing device stack and the ESP32-S3 DWC2 controller driver.
+  # Pinned to the same version cherry-embedded/CherryDAP builds against.
+  cherry-embedded/cherryusb:
+    version: "1.4.3"

@@ -1,0 +1,15 @@
+build/
+build.log
+.idf-tmp/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+
+# 旧上游 git 历史的本地备份（仅本机保留，不入库）
+.git-backup-upstream.zip

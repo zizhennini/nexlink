@@ -1,0 +1,106 @@
+# Target
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- Chip on the bench (verified with `esptool.py flash_id` on COM11) ---
+#   Module: ESP32-S3-WROOM-1-N16R8
+#   Chip  : ESP32-S3 (QFN56) rev v0.2
+#   Flash : 16MB, quad (4 data lines)   -> QIO, 16MB
+#   PSRAM : 8MB embedded, 3.3V          -> Octal
+
+# Flash (16MB QIO)
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# PSRAM (8MB Octal). Still enabled, but note the display framebuffer is now a
+# 1KB 1bpp buffer in internal RAM - PSRAM is only used for the serial/history
+# buffers, so it is no longer on the critical path for the UI.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+
+# CPU
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# WiFi
+CONFIG_ESP_WIFI_ENABLED=y
+CONFIG_ESP_WIFI_NVS_ENABLED=y
+
+# Partition table
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# OTA safety: an uploaded image that never reaches app_main (crash loop) is
+# auto-reverted by the bootloader; reaching app_main cancels the rollback.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# FreeRTOS
+CONFIG_FREERTOS_HZ=1000
+
+# --- I2C slave driver, version 2 --------------------------------------------
+# main/i2c_mon.c is written against the v2 slave API: i2c_slave_config_t with
+# receive_buf_depth / enable_internal_pullup, the on_request / on_receive
+# callbacks, and i2c_slave_rx_done_event_data_t.length.  In IDF 5.5 all of
+# those only exist when this switch is on (the v1 layout is the default, and
+# the v2 struct members are hidden behind an #else branch).  Leaving it off
+# produces a wall of "has no member named ..." errors in i2c_mon.c.
+CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2=y
+
+# LWIP sockets
+CONFIG_LWIP_MAX_SOCKETS=16
+
+# --- Console: UART0 (IO43 TX / IO44 RX) ---
+# The native USB peripheral (IO19/IO20) is owned by the CMSIS-DAP probe
+# (CherryUSB), so USB-Serial-JTAG can no longer be used for logs.  The
+# secondary console must be switched off explicitly: on ESP32-S3 it defaults
+# to the USB-Serial-JTAG peripheral, which would drive IO19/IO20 at the same
+# time as the OTG controller.
+# To read the console, wire a 3.3V USB-TTL adapter to IO43 (TX) / IO44 (RX).
+#
+# Recovery / re-flashing: hold BOOT, tap RESET, release BOOT. The ROM then
+# brings USB-Serial-JTAG back up and COM11 works with esptool / idf.py flash
+# again even though the application has taken over the USB controller.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_NUM=0
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# --- USB device stack (CherryUSB) -------------------------------------------
+# The DAP probe is a WinUSB device, so only CherryUSB's *device* side is built.
+# CONFIG_CHERRYUSB_DEVICE is what makes the component contribute any sources at
+# all; without it cherryusb.cmake adds nothing and the link fails with
+# undefined usbd_* symbols.
+#
+# The device controller choice matters even though CherryUSB's ESP_PLATFORM
+# CMake branch also forces it: that branch only sets a CMake variable for
+# source selection, while this choice is what the compile-time config sees, and
+# keeping the two in agreement avoids a confusing mismatch.
+#
+# The class selections (CDC_ACM / HID / MSC / ...) are all deliberately left at
+# their default of "n": CMSIS-DAP v2 is a raw vendor interface, and every class
+# driver compiled in here would cost flash and endpoints for nothing.
+#
+# usb_config.h (ep0 buffer sizes, DWC2 FIFO split, ESP_USBD_BASE) is supplied by
+# CherryUSB itself, at osal/idf/usb_config.h -- an application-provided copy is
+# not wanted, because the component's own copy is the one that matches the
+# CherryUSB version in use.
+CONFIG_CHERRYUSB=y
+CONFIG_CHERRYUSB_DEVICE=y
+CONFIG_CHERRYUSB_DEVICE_SPEED_FS=y
+CONFIG_CHERRYUSB_DEVICE_DWC2_ESP=y
+# The USB-TTL download bridge (serial/usb_ttl.c) needs the CDC-ACM class.
+CONFIG_CHERRYUSB_DEVICE_CDC_ACM=y
+
+# Keep the USB PHY alive while the WiFi PHY initialises.  Without this the PHY
+# library powers the USB PHY down during esp_wifi_init() to protect RF
+# performance, and the DAP probe would stop enumerating as soon as WiFi comes
+# up -- which would defeat the whole point of a *wireless* debugger.
+CONFIG_ESP_PHY_ENABLE_USB=y
+
+# Compiler optimization
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# HTTP Client (HTTPS for AI API)
+CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y

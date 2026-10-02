@@ -1,0 +1,45 @@
+NexLink
+Copyright 2026 zizhennini
+
+This product includes software developed by third parties. The components
+listed below are either vendored into this repository or pulled in as ESP-IDF
+managed components at build time.
+
+================================================================================
+1. CMSIS-DAP core  --  main/dap/  (DAP.c, DAP.h, DAP_vendor.c, SW_DP.c)
+================================================================================
+Origin : ARMmbed DAPLink (https://github.com/ARMmbed/DAPLink)
+Port   : cherry-embedded/CherryDAP (https://github.com/cherry-embedded/CherryDAP)
+License: Apache License 2.0
+
+Files are kept verbatim apart from the PIN_DELAY_SLOW fix documented inline in
+DAP.h; DAP_config.h is NexLink's own board definition.
+
+================================================================================
+2. CherryUSB  --  managed component (cherry-embedded/cherryusb 1.4.3)
+================================================================================
+Origin : https://github.com/cherry-embedded/CherryUSB
+License: Apache License 2.0
+
+Provides the USB device stack and the ESP32-S3 DWC2 controller driver behind
+main/dap/dap_usb.c (WinUSB-facing CMSIS-DAP) and main/serial/usb_ttl.c
+(CDC-ACM virtual COM). Pulled in via main/idf_component.yml, not vendored.
+
+================================================================================
+3. cJSON  --  managed component (espressif/cjson 1.7.15)
+================================================================================
+Origin : https://github.com/DaveGamble/cJSON
+License: MIT
+
+Used for JSON handling on the device side.
+
+================================================================================
+4. Upstream project
+================================================================================
+NexLink is a derivative work of ai-wireless-debugger:
+    https://gitee.com/JasonYANG170/ai-wireless-debugger
+
+The upstream project supplied the initial structure: WiFi manager, pin
+configuration, the UART bridge, the SPI/I2C/PWM monitors, the HTTP status page,
+the original LCD menu and the first MCP Server. NexLink retains that code under
+the terms of the Apache License 2.0 together with this repository.
