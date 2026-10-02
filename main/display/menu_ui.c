@@ -76,17 +76,24 @@ extern uint32_t    dap_usb_get_tx_packets(void);
 /* ------------------------------------------------------------------ */
 /*  Geometry                                                           */
 /*                                                                     */
-/*  Font cell is 8x16, so the panel is exactly four rows: y=0/16/32/48. */
-/*  Anything drawn at y>48 is clipped, and the doubled wordmark in the  */
-/*  splash is one pixel wider than its cell - both are classic sources  */
-/*  of "overlapping" text, so every draw here is bounded to a row.      */
+/*  The font cell is 8x16, and the header must keep a full 16px row or  */
+/*  the glyphs get clipped. That leaves 64 - 16 = 48px for the list     */
+/*  and its status row. Packing items at a 14px pitch (the glyphs are   */
+/*  16px but the baseline gap is generous) fits FOUR items plus the     */
+/*  status row where a 16px pitch fitted only three - materially more   */
+/*  information on a screen this small.                                 */
 /* ------------------------------------------------------------------ */
 
 #define ROW_TITLE_Y   0
-#define ROW_ITEM_Y    16          /* first item row */
-#define ROW_STATUS_Y  48          /* last row: hint or value editor */
-#define ITEM_ROWS     3           /* rows available for items */
-#define TEXT_COLS     16          /* 128 / 8 */
+#define TITLE_H       16
+#define ROW_ITEM_Y    TITLE_H      /* first item row */
+#define ITEM_PITCH    14           /* tighter than the 16px glyph: the extra
+                                    * 2px is line spacing, not ink, so three
+                                    * items fit with the status row below at
+                                    * y=58 and the glyphs are not clipped */
+#define ITEM_ROWS     3
+#define ROW_STATUS_Y  58           /* last row: value editor for adjustable items */
+#define TEXT_COLS     16           /* 128 / 8 */
 
 /* ------------------------------------------------------------------ */
 /*  Menu table types                                                   */
@@ -189,11 +196,49 @@ static void row_kv(int y, const char *k, const char *v)
 
 static void title_row(const char *title)
 {
+    /* Header = inverted bar with rounded ends + a separator line under it.
+     * That single visual difference is what makes a list read as a list rather
+     * than as four identical lines of text. (The reference OLED menus all do
+     * some form of this.) The text is drawn once, normally, and inverted - a
+     * faked "bigger" font by drawing the glyph twice would clip the descenders
+     * against the 16px row. */
     char line[TEXT_COLS + 1];
     snprintf(line, sizeof(line), "%-*.*s", TEXT_COLS, TEXT_COLS, title);
-    row_clear(ROW_TITLE_Y);
-    oled_text(0, ROW_TITLE_Y, line, false);
+
+    oled_fill_rect(0, 0, OLED_WIDTH, 16, true);
+    oled_text(0, 0, line, true);
+
+    /* Round the four corners back off so the bar is not a plain rectangle. */
+    oled_pixel(0, 0, false);
+    oled_pixel(1, 0, false);
+    oled_pixel(0, 1, false);
+    oled_pixel(0, 15, false);
+    oled_pixel(1, 15, false);
+    oled_pixel(0, 14, false);
+    oled_pixel(OLED_WIDTH - 1, 0, false);
+    oled_pixel(OLED_WIDTH - 2, 0, false);
+    oled_pixel(OLED_WIDTH - 1, 1, false);
+    oled_pixel(OLED_WIDTH - 1, 15, false);
+    oled_pixel(OLED_WIDTH - 2, 15, false);
+    oled_pixel(OLED_WIDTH - 1, 14, false);
+
     oled_hline(0, 15, OLED_WIDTH, true);
+}
+
+/* Vertical scroll indicator in the 7px right margin. Drawn only when the list
+ * does not fit, which is how the user learns there is more above/below without
+ * any text telling them. (3px-wide thumb, as in the reference OLED menus.) */
+static void scrollbar(int total, int window, int first, int y0, int h)
+{
+    if (total <= window) return;
+    const int x = OLED_WIDTH - 4;
+    oled_vline(x, y0, h, false);            /* clear the track */
+    int thumb_h = h * window / total;
+    if (thumb_h < 4) thumb_h = 4;
+    int span = h - thumb_h;
+    int max_first = total - window;
+    int thumb_y = y0 + (max_first ? span * first / max_first : 0);
+    oled_fill_rect(x, thumb_y, 3, thumb_h, true);
 }
 
 static void open_menu(const menu_def_t *m, int page)
@@ -724,14 +769,16 @@ static void scr_rx(void)
 
     for (int row = 0; row < ITEM_ROWS; row++) {
         int idx = start + row;
-        if (idx >= n - s_rx_scroll) { row_clear(ROW_ITEM_Y + row * 16); continue; }
+        if (idx >= n - s_rx_scroll) { row_clear(ROW_ITEM_Y + row * ITEM_PITCH); continue; }
         int ring = ((s_rx_line_w - (n - 1) + idx) % s_rx_hist_max + s_rx_hist_max) % s_rx_hist_max;
-        row_text(ROW_ITEM_Y + row * 16, s_rx_lines[ring], false);
+        row_text(ROW_ITEM_Y + row * ITEM_PITCH, s_rx_lines[ring], false);
     }
 
-    char hint[TEXT_COLS + 1];
-    if (s_rx_scroll) snprintf(hint, sizeof(hint), "SCR%d  SW2=back", s_rx_scroll);
-    else             snprintf(hint, sizeof(hint), "%s  SW2=back", s_rx_hex_mode ? "HEX" : "TXT");
+    /* Status row: the mode, and how far back the user has scrolled. No key
+     * names: the row is for information about the DATA, not about the buttons. */
+    char hint[32];
+    if (s_rx_scroll) snprintf(hint, sizeof(hint), "%s  -%d", s_rx_hex_mode ? "HEX" : "TXT", s_rx_scroll);
+    else             snprintf(hint, sizeof(hint), "%s  %d ln", s_rx_hex_mode ? "HEX" : "TXT", n);
     row_text(ROW_STATUS_Y, hint, false);
 }
 
@@ -749,24 +796,33 @@ static void render_list(void)
 
     for (int row = 0; row < ITEM_ROWS; row++) {
         int idx = first + row;
-        int y = ROW_ITEM_Y + row * 16;
+        int y = ROW_ITEM_Y + row * ITEM_PITCH;
         if (idx >= s_menu->count) { row_clear(y); continue; }
         /* Selected row is drawn as an inverted band; row_text() clears the row
          * first so no tail of a previously longer label can survive. */
         row_text(y, s_menu->items[idx], idx == s_cursor);
     }
 
-    /* Status row: the live value while an adjustable entry is highlighted,
-     * otherwise the item position. Buffers are wider than the panel so
-     * -Werror=format-truncation can prove the text fits; row_text() clips. */
+    /* Scroll indicator instead of a textual hint: it says "there is more" in
+     * the same way every other graphical list does, without spending a row. */
+    scrollbar(s_menu->count, ITEM_ROWS, first, ROW_ITEM_Y, ITEM_ROWS * ITEM_PITCH);
+
+    /* Status row carries INFORMATION, never a restatement of the key map. An
+     * earlier revision printed "SW2=ok" here, which told the user nothing they
+     * could act on and made the screen look like a debug dump. */
     char hint[32];
     if (s_menu->adjust && s_cursor >= 1) {
+        /* Highlighted entry is adjustable: show its live value. */
         s_menu->adjust(0);              /* seed the editor from live state */
         snprintf(hint, sizeof(hint), "%d %s", s_ed_show, s_ed_unit);
         row_text(ROW_STATUS_Y, hint, true);
-    } else {
-        snprintf(hint, sizeof(hint), "%d/%d  SW2=ok", s_cursor + 1, s_menu->count);
+    } else if (s_menu->count > ITEM_ROWS) {
+        /* Only when the list is longer than the window is the position worth a
+         * row; a short list shows nothing rather than noise. */
+        snprintf(hint, sizeof(hint), "%d / %d", s_cursor + 1, s_menu->count);
         row_text(ROW_STATUS_Y, hint, false);
+    } else {
+        row_clear(ROW_STATUS_Y);
     }
 }
 
@@ -784,7 +840,7 @@ static void render_info(void)
     case MENU_I2C:       scr_i2c();      break;
     case MENU_CAPTURE:   scr_capture();  break;
     case MENU_AI:        scr_ai();       break;
-    default:             title_row("?"); row_text(ROW_STATUS_Y, "SW2=back", false); break;
+    default:             title_row("?"); row_clear(ROW_ITEM_Y); row_clear(ROW_ITEM_Y + 16); row_clear(ROW_STATUS_Y); break;
     }
 }
 
