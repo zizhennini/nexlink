@@ -10,22 +10,36 @@
  *
  * WHY THIS IS NOT ARM'S SWO.c
  * ---------------------------
- * ARM's implementation (vendored reference: DAPLink SWO.c v2.0.1) drives a
- * CMSIS `Driver_USART` instance, which does not exist in ESP-IDF. The command
- * layer, the response encoding and the error/status semantics are reproduced
- * exactly here; only the byte source is different - an ESP32-S3 UART with a
- * hardware RX FIFO instead of a peripheral DMA channel. The host therefore
- * cannot tell the difference.
+ * ARM's implementation (reference: DAPLink SWO.c v2.0.1) drives a CMSIS
+ * `Driver_USART` instance, which does not exist in ESP-IDF. The command layer,
+ * the response encoding and the error/status semantics are reproduced exactly
+ * here; only the byte source is different. The host cannot tell the difference.
  *
  * The SWO wire is an expansion-header IO (PIN_DEBUG_SWO), claimed at boot by
  * debug_pins.c, because the board has no spare dedicated pin for it.
  *
- * DATA PATH
- * ---------
- * UART RX ISR -> ring buffer (this file) -> SWO_Data() -> USB bulk response.
- * A task is avoided on purpose: SWO_Data is polled by the host, so the ISR can
- * write straight into the ring and the polling call drains it. That keeps the
- * whole feature to one ISR and no extra stack.
+ * NO EVENT TASK, NO PRIVATE RING
+ * ------------------------------
+ * The bytes live in the UART driver's own RX ring, which its ISR fills and
+ * which already drops the OLDEST data when full - exactly the policy SWO
+ * wants. A previous revision added an event task plus a second ring on top,
+ * which introduced two real hazards: freeing the driver while that task was
+ * still blocked on the driver's queue (use-after-free), and a producer that
+ * consumed from the ring while the consumer was reading, so the byte count
+ * announced to the host could exceed the bytes actually copied.
+ *
+ * Both hazards disappear by removing the second stage: SWO_Data() reads the
+ * driver ring directly. This is safe because every SWO command handler runs in
+ * the single DAP request task - DAP_ExecuteCommand() is called only from
+ * dap_usb.c's request task (the TCP CMSIS-DAP path in swd/cmsis_dap.c has its
+ * own command set) - and the UART driver is thread-safe against its own ISR.
+ * There is therefore no cross-task race left to synchronize, and no shutdown
+ * handshake to get wrong.
+ *
+ * Overrun reporting still works without our own ring: installing an event
+ * queue makes the driver's ISR report FIFO overflow and buffer-full through
+ * UART_FIFO_OVF / UART_BUFFER_FULL, which are drained (non-blocking) into the
+ * standard DAP_SWO_BUFFER_OVERRUN status bit.
  */
 #include "DAP_config.h"
 
@@ -40,143 +54,70 @@
 #include "esp_timer.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
-#include "freertos/FreeRTOS.h"
 
 static const char *TAG = "swo";
-
-/* ------------------------------------------------------------------ */
-/*  Ring buffer (power-of-two, so index masking is cheap in the ISR)   */
-/* ------------------------------------------------------------------ */
-
-#define SWO_RING_MASK   (SWO_BUFFER_SIZE - 1U)
-
-static uint8_t           s_ring[SWO_BUFFER_SIZE];
-static volatile uint32_t s_head;          /* next write position, ISR-owned */
-static volatile uint32_t s_tail;          /* next read position, task-side  */
-static volatile uint16_t s_ovf;           /* bytes lost since the last status report */
-static volatile bool     s_active;        /* capture enabled by the host */
-
-/* Task side reads tail/head while the UART ISR advances head on the same core;
- * suspending the scheduler for the few instructions of an index update is
- * cheaper than a spinlock here and cannot deadlock. */
-static inline uint32_t ring_count(void)
-{
-    vTaskSuspendAll();
-    uint32_t n = s_head - s_tail;
-    xTaskResumeAll();
-    return n;
-}
-
-static inline uint32_t ring_get(uint8_t *dst, uint32_t n)
-{
-    vTaskSuspendAll();
-    uint32_t avail = s_head - s_tail;
-    if (n > avail) n = avail;
-    uint32_t tail = s_tail;
-    xTaskResumeAll();
-
-    for (uint32_t i = 0; i < n; i++)
-        dst[i] = s_ring[(tail + i) & SWO_RING_MASK];
-
-    vTaskSuspendAll();
-    s_tail = tail + n;
-    xTaskResumeAll();
-    return n;
-}
-
-/* Drop `n` bytes (used when the ISR finds the ring full). Called from the ISR
- * context through uart_driver_install's event task in practice, but written so
- * it is correct from either. */
-static inline void ring_skip(uint32_t n)
-{
-    uint32_t avail = s_head - s_tail;
-    if (n > avail) n = avail;
-    s_tail += n;
-    s_ovf = (uint16_t)(s_ovf + n);
-}
 
 /* ------------------------------------------------------------------ */
 /*  UART plumbing                                                      */
 /* ------------------------------------------------------------------ */
 
-#define SWO_RX_FIFO     1024
-#define SWO_EVT_QUEUE   16
+/* The driver's RX ring is the trace buffer. SWO_BUFFER_SIZE is required to be a
+ * power of two by ARM's arithmetic; it is used here only as the ring size, so
+ * any sane value works, but keep it a power of two to match the documentation
+ * and the DAP_ID_SWO_BUFFER_SIZE value reported to the host. */
+_Static_assert((SWO_BUFFER_SIZE & (SWO_BUFFER_SIZE - 1U)) == 0U,
+               "SWO_BUFFER_SIZE must be a power of two");
 
-static bool         s_installed;
-static uart_port_t  s_port      = (uart_port_t)SWO_UART_DRIVER;
-static uint32_t     s_baud;               /* 0 = not configured yet */
+#define SWO_EVT_QUEUE   8
+
+static bool          s_installed;
+static uart_port_t   s_port = (uart_port_t)SWO_UART_DRIVER;
+static uint32_t      s_baud;               /* 0 = not configured yet */
 static QueueHandle_t s_evt_q;
-/* Set by the event task to NULL right before it deletes itself; SWO_Mode_UART()
- * waits on it before freeing the UART driver. */
-static volatile TaskHandle_t s_swo_task;
 
-/* UART event task: the ESP-IDF UART driver delivers RX in chunks through an
- * event queue, so this is where bytes actually enter the ring. Priority sits
- * below the DUT bridge (8) so SWO trace can never starve the serial path. */
-static void swo_event_task(void *arg)
+/* Task-context only (see the file header): no locking is required. */
+static uint16_t s_ovf;                     /* overruns since the last report */
+static bool     s_stream_err;              /* wire-level fault seen (break/framing) */
+static uint32_t s_rx_total;                /* ITM bytes handed to the host */
+
+/* Drain whatever the driver's ISR has posted, without blocking. Called from the
+ * command handlers, i.e. the DAP request task. */
+static void swo_drain_events(void)
 {
-    (void)arg;
-    uint8_t buf[256];
+    if (!s_evt_q) return;
+
     uart_event_t ev;
-
-    for (;;) {
-        if (xQueueReceive(s_evt_q, &ev, portMAX_DELAY) != pdTRUE)
-            continue;
-
-        /* Shutdown handshake: SWO_Mode_UART() cannot delete the driver while
-         * this task is blocked inside xQueueReceive(), because the queue
-         * belongs to the driver. It sends this poison event instead, waits for
-         * s_swo_task to be cleared, and only then frees the driver. */
-        if (ev.type == UART_EVENT_MAX) break;
-
+    while (xQueueReceive(s_evt_q, &ev, 0) == pdTRUE) {
         switch (ev.type) {
-        case UART_DATA: {
-            int n = uart_read_bytes(s_port, buf, sizeof(buf), 0);
-            if (n <= 0) break;
-
-            if (!s_active) break;         /* host stopped capture: discard */
-
-            uint32_t space = SWO_BUFFER_SIZE - (s_head - s_tail);
-            if ((uint32_t)n > space) {
-                /* Oldest trace is lost rather than the newest: a trace that
-                 * stops exactly when it gets interesting is useless. */
-                ring_skip((uint32_t)n - space);
-            }
-            for (int i = 0; i < n; i++)
-                s_ring[s_head++ & SWO_RING_MASK] = buf[i];
-            break;
-        }
         case UART_FIFO_OVF:
-            s_ovf = (uint16_t)(s_ovf + 1);
-            uart_flush_input(s_port);
-            break;
         case UART_BUFFER_FULL:
-            s_ovf = (uint16_t)(s_ovf + 1);
-            uart_flush_input(s_port);
-            xQueueReset(s_evt_q);
+            /* Bytes were lost: the ISR already reported this, and the driver
+             * dropped the oldest data. Surface it as the standard SWO overrun
+             * flag rather than a private status field, because that is what
+             * host tools already check. */
+            s_ovf++;
             break;
         case UART_FRAME_ERR:
         case UART_PARITY_ERR:
-            s_ovf = (uint16_t)(s_ovf + 1);
+        case UART_BREAK:
+            /* A wire-level fault, not a buffer problem: DAP_SWO_STREAM_ERROR
+             * is the matching CMSIS-DAP flag (ARM raises it from the USART
+             * error callback). */
+            s_stream_err = true;
             break;
         default:
             break;
         }
     }
-
-    /* Reached only through the shutdown handshake above. Clearing the handle
-     * is what releases SWO_Mode_UART() to free the driver. */
-    s_swo_task = NULL;
-    vTaskDelete(NULL);
 }
 
 /* ------------------------------------------------------------------ */
 /*  CMSIS-DAP SWO command layer                                        */
 /*                                                                    */
-/*  The state machine below mirrors ARM's SWO.c: TraceTransport/Mode/  */
-/*  Status plus the banked error flags. It is small enough to keep     */
-/*  verbatim rather than re-derive, and hosts depend on the exact      */
-/*  status bit semantics.                                              */
+/*  The state machine mirrors ARM's SWO.c: TraceTransport / TraceMode / */
+/*  TraceStatus plus the banked error flags. Hosts depend on the exact */
+/*  status bit semantics, so this is kept verbatim rather than          */
+/*  re-derived.                                                        */
 /* ------------------------------------------------------------------ */
 
 static uint8_t TraceTransport = 0U;      /* 0=off, 1=UART (DAP_SWO_Data) */
@@ -190,16 +131,22 @@ static void ClearTrace(void)
     TraceError[0] = 0U;
     TraceError[1] = 0U;
     TraceError_n  = 0U;
-    s_head = 0U;
-    s_tail = 0U;
-    s_ovf  = 0U;
+    s_ovf     = 0;
+    s_stream_err = false;
+    if (s_installed) uart_flush_input(s_port);
 }
 
+/* Bytes available, straight from the UART driver's ring.
+ *
+ * ARM returns TraceIndexI - TraceIndexO even when capture is inactive, so a
+ * host can still drain what arrived before SWO_Control(0); the equivalent here
+ * is simply asking the driver. */
 static uint32_t GetTraceCount(void)
 {
-    if (TraceStatus == DAP_SWO_CAPTURE_ACTIVE)
-        return ring_count();
-    return 0U;
+    if (!s_installed) return 0U;
+    size_t pending = 0;
+    if (uart_get_buffered_data_len(s_port, &pending) != ESP_OK) return 0U;
+    return (uint32_t)pending;
 }
 
 static uint8_t GetTraceStatus(void)
@@ -212,18 +159,15 @@ static uint8_t GetTraceStatus(void)
     return status;
 }
 
-/* Record an error flag for the next status report.
- *
- * Currently unreferenced: every UART failure path this port can actually hit
- * (FIFO overflow, buffer full, framing/parity error) is already reported by
- * SWO_Data() as DAP_SWO_BUFFER_OVERRUN. The hook stays because the other
- * DAPLink error code, DAP_SWO_STREAM_ERROR, is what ARM's USART callback
- * raises on a break condition - worth keeping visible if a target turn out to
- * need it. Marked unused rather than deleted so enabling it is a one-liner. */
-__attribute__((unused))
-static void SetTraceError(uint8_t flag)
+/* Fold the accumulated hardware error report into the status byte the host
+ * reads. Called from every status-reporting command so an overrun is visible
+ * through SWO_Status / SWO_ExtendedStatus too, not only SWO_Data. */
+static uint8_t sw_status_with_errors(void)
 {
-    TraceError[TraceError_n] |= flag;
+    uint8_t status = GetTraceStatus();
+    if (s_ovf)        status |= DAP_SWO_BUFFER_OVERRUN;
+    if (s_stream_err) status |= DAP_SWO_STREAM_ERROR;
+    return status;
 }
 
 /* --- SWO_Mode_UART: bring the UART up / down ---------------------------- */
@@ -244,7 +188,7 @@ uint32_t SWO_Mode_UART(uint32_t enable)
             .source_clk = UART_SCLK_DEFAULT,
         };
 
-        if (uart_driver_install(s_port, SWO_RX_FIFO, 0, SWO_EVT_QUEUE,
+        if (uart_driver_install(s_port, SWO_BUFFER_SIZE, 0, SWO_EVT_QUEUE,
                                 &s_evt_q, 0) != ESP_OK) {
             ESP_LOGE(TAG, "uart_driver_install failed");
             return 0U;
@@ -257,46 +201,24 @@ uint32_t SWO_Mode_UART(uint32_t enable)
             s_evt_q = NULL;
             return 0U;
         }
-        if (xTaskCreate(swo_event_task, "swo_rx", 3072, NULL, 6,
-                        (TaskHandle_t *)&s_swo_task) != pdPASS) {
-            ESP_LOGE(TAG, "SWO task creation failed");
-            uart_driver_delete(s_port);
-            s_evt_q = NULL;
-            return 0U;
-        }
         uart_flush_input(s_port);
-        s_installed = true;
-        s_baud = cfg.baud_rate;
-        ESP_LOGI(TAG, "SWO UART ready on IO%d @ %lu bps",
-                 debug_pins_swo(), (unsigned long)s_baud);
+        s_installed  = true;
+        s_ovf        = 0;
+        s_stream_err = false;
+        s_baud       = (uint32_t)cfg.baud_rate;
+        ESP_LOGI(TAG, "SWO UART ready on IO%d @ %lu bps (%u B RX ring)",
+                 debug_pins_swo(), (unsigned long)s_baud, (unsigned)SWO_BUFFER_SIZE);
         return 1U;
     }
 
-    /* Disable: stop capture, then tear the driver down.
-     *
-     * Order matters. uart_driver_delete() frees the event queue, so the event
-     * task must already be out of xQueueReceive() before it runs - otherwise
-     * the queue is freed with the task still blocked on it (the object is
-     * deleted by the driver, so the task's xQueueReceive() is a use-after-free
-     * the moment anything else wakes the scheduler). The poison event is the
-     * handshake: the task sees UART_EVENT_MAX, clears the handle and deletes
-     * itself, and only then is the driver freed. */
-    s_active = false;
-
-    if (s_evt_q) {
-        uart_event_t poison = { .type = UART_EVENT_MAX };
-        (void)xQueueSend(s_evt_q, &poison, pdMS_TO_TICKS(50));
-    }
-    for (int i = 0; i < 20 && s_swo_task != NULL; i++)
-        vTaskDelay(pdMS_TO_TICKS(5));
-    if (s_swo_task != NULL)
-        ESP_LOGW(TAG, "SWO task did not stop; freeing the driver anyway");
-
+    /* Disable. Safe to free the driver here: every SWO command runs in the DAP
+     * request task, and nothing else touches the peripheral, so there is no
+     * task left blocked on the driver's queue. uart_driver_delete() also frees
+     * s_evt_q. */
     if (s_installed) {
-        uart_driver_delete(s_port);   /* frees s_evt_q as well */
-        s_installed = false;
-        s_evt_q = NULL;
-        s_swo_task = NULL;
+        uart_driver_delete(s_port);
+        s_installed  = false;
+        s_evt_q      = NULL;
     }
     return 1U;
 }
@@ -309,7 +231,8 @@ uint32_t SWO_Baudrate_UART(uint32_t baudrate)
 
     /* Read out whatever is in flight before the rate changes, so the tail of
      * the previous stream is not decoded at the wrong baud. */
-    if (TraceStatus & DAP_SWO_CAPTURE_ACTIVE) uart_flush_input(s_port);
+    uart_wait_tx_done(s_port, 0);
+    uart_flush_input(s_port);
 
     if (uart_set_baudrate(s_port, (int)baudrate) != ESP_OK) {
         ESP_LOGW(TAG, "SWO baudrate %lu rejected", (unsigned long)baudrate);
@@ -321,13 +244,11 @@ uint32_t SWO_Baudrate_UART(uint32_t baudrate)
 
 uint32_t SWO_Control_UART(uint32_t active)
 {
-    if (active) {
-        if (!s_installed) return 0U;
-        uart_flush_input(s_port);
-        s_active = true;
-    } else {
-        s_active = false;
-    }
+    if (!s_installed) return 0U;
+    /* The data path is the driver's ring, so "start" only has to discard stale
+     * bytes and "stop" has nothing to tear down (ClearTrace runs on the next
+     * enable and flushes the ring). */
+    if (active) uart_flush_input(s_port);
     return 1U;
 }
 
@@ -412,7 +333,8 @@ uint32_t SWO_Control(const uint8_t *request, uint8_t *response)
 
 uint32_t SWO_Status(uint8_t *response)
 {
-    uint8_t  status = GetTraceStatus();
+    swo_drain_events();
+    uint8_t  status = sw_status_with_errors();
     uint32_t count  = GetTraceCount();
 
     response[0] = status;
@@ -425,11 +347,12 @@ uint32_t SWO_Status(uint8_t *response)
 
 uint32_t SWO_ExtendedStatus(const uint8_t *request, uint8_t *response)
 {
+    swo_drain_events();
     uint8_t  cmd = *request;
     uint32_t num = 0U;
 
     if (cmd & 0x01U) {
-        *response++ = GetTraceStatus();
+        *response++ = sw_status_with_errors();
         num += 1U;
     }
     if (cmd & 0x02U) {
@@ -441,14 +364,12 @@ uint32_t SWO_ExtendedStatus(const uint8_t *request, uint8_t *response)
         num += 4U;
     }
     if (cmd & 0x04U) {
-        /* Timestamp of the most recent trace byte, as (index, tick). The host
-         * uses this only for correlation, so the microsecond clock is ideal. */
-        uint32_t tick;
-        uint32_t index;
-        vTaskSuspendAll();
-        index = s_head;
-        xTaskResumeAll();
-        tick = (uint32_t)esp_timer_get_time();
+        /* Trace index and tick. The index is the running byte count (driver
+         * ring position plus whatever has been read out), and the tick is the
+         * current microsecond clock - a query-time stamp, not the arrival time
+         * of the last byte, which the host only uses for rough correlation. */
+        uint32_t index = s_rx_total;
+        uint32_t tick  = (uint32_t)esp_timer_get_time();
 
         *response++ = (uint8_t)(index >> 0);
         *response++ = (uint8_t)(index >> 8);
@@ -466,8 +387,9 @@ uint32_t SWO_ExtendedStatus(const uint8_t *request, uint8_t *response)
 
 uint32_t SWO_Data(const uint8_t *request, uint8_t *response)
 {
-    uint8_t  status = GetTraceStatus();
-    uint32_t count  = GetTraceCount();
+    swo_drain_events();
+
+    uint8_t  status = sw_status_with_errors();
     uint32_t want;
 
     /* Transport 1 (UART) is the only supported one; transport 2 (streaming to
@@ -476,25 +398,25 @@ uint32_t SWO_Data(const uint8_t *request, uint8_t *response)
     if (TraceTransport == 1U) {
         want = (uint32_t)request[0] | ((uint32_t)request[1] << 8);
         if (want > (DAP_PACKET_SIZE - 4U)) want = DAP_PACKET_SIZE - 4U;
-        if (count > want) count = want;
     } else {
-        count = 0U;
+        want = 0U;
     }
 
-    /* Overflow reporting rides on the DAP_SWO_BUFFER_OVERRUN bit rather than
-     * a private status field, because that is what host tools already check. */
-    if (s_ovf) {
-        status |= DAP_SWO_BUFFER_OVERRUN;
-        s_ovf = 0;
+    /* Read exactly what is there, and report exactly what was read: the count
+     * in the header is derived from the return value of the read, so the host
+     * can never be told to expect bytes that were not copied. */
+    int got = 0;
+    if (want) {
+        got = uart_read_bytes(s_port, &response[3], want, 0);
+        if (got < 0) got = 0;
+        s_rx_total += (uint32_t)got;
     }
 
     response[0] = status;
-    response[1] = (uint8_t)(count >> 0);
-    response[2] = (uint8_t)(count >> 8);
+    response[1] = (uint8_t)((uint32_t)got >> 0);
+    response[2] = (uint8_t)((uint32_t)got >> 8);
 
-    if (count) ring_get(&response[3], count);
-
-    return (2U << 16) | (3U + count);
+    return (2U << 16) | (uint32_t)(3 + got);
 }
 
 /* ------------------------------------------------------------------ */

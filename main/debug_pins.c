@@ -114,11 +114,18 @@ int debug_pins_init(void)
 
     for (size_t i = 0; i < DEBUG_IO_N; i++) {
         int io = DEBUG_IO[i];
-        /* Config protection: these are strapping-adjacent pins on some boards
-         * and are always expansion IOs. Guard against a pinout.h edit that
-         * accidentally points at a dedicated pin (USB, flash, PSRAM, OLED...). */
-        if (io < 0 || io > 48) {
-            ESP_LOGE(TAG, "debug IO%d out of range - debug probe disabled", io);
+        /* Guard against a pinout.h edit that points a debug signal at a pin the
+         * board cannot give up. A plain `io > 48` range check would happily
+         * accept IO19/IO20 (native USB) or IO26..IO37 (flash / octal PSRAM),
+         * i.e. exactly the pins that must never be taken - so the check is
+         * expressed as "must be one of the expansion IOs" instead. */
+        bool is_expansion = (io == PIN_FREE_1 || io == PIN_FREE_2 ||
+                             io == PIN_FREE_3 || io == PIN_FREE_4 ||
+                             io == PIN_FREE_5);
+        if (!is_expansion) {
+            ESP_LOGE(TAG, "debug IO%d is not an expansion IO (IO%d/%d/%d/%d/%d) - "
+                          "debug probe disabled",
+                     io, PIN_FREE_1, PIN_FREE_2, PIN_FREE_3, PIN_FREE_4, PIN_FREE_5);
             return 0;
         }
         release_io(io);

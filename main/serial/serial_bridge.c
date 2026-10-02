@@ -308,6 +308,14 @@ esp_err_t serial_bridge_set_baud(uint32_t baudrate)
     return err;
 }
 
+uint32_t serial_bridge_get_baud(void)
+{
+    uint32_t baud = 0;
+    if (!s_init_done) return 0;
+    if (uart_get_baudrate(UART1_PORT_NUM, &baud) != ESP_OK) return 0;
+    return baud;
+}
+
 esp_err_t serial_bridge_set_bufsize(size_t bytes)
 {
     if (!s_init_done || bytes < 64)

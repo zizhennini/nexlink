@@ -29,7 +29,9 @@
 #include "ws_server.h"
 #include "dap_server.h"
 #include "dap_usb.h"
-#include "debug_pins.h"
+/* debug_pins.h is intentionally not included here: the expansion-IO claim now
+ * happens inside dap_usb_start(), so every path that enables the probe
+ * arbitrates identically. */
 #include "usb_ttl.h"
 #include "http_status.h"
 
@@ -170,11 +172,12 @@ void app_main(void)
         usb_mode = USB_MODE_OFF;
     }
     if (usb_mode == USB_MODE_DAP) {
-        /* Claim the expansion IOs the probe needs for TDI/TDO/nTRST/SWO.
-         * This runs before dap_usb_start() and after the monitors, so a
-         * monitor that was holding one of those IOs is stopped here and the
-         * reason shows up in the log and in /api/status. */
-        debug_pins_init();
+        /* dap_usb_start() claims the expansion IOs the probe needs for
+         * TDI/TDO/nTRST/SWO through debug_pins_init(), so every path that
+         * enables the probe - boot, /api/usb_dap, /api/usb_mode, the OLED
+         * Config page - arbitrates the pins the same way. A monitor holding
+         * one of those IOs is stopped there and the reason shows up in the log
+         * and in /api/status. */
         if (dap_usb_start() != ESP_OK) {
             ESP_LOGW(TAG, "USB CMSIS-DAP probe unavailable - SWD over TCP only");
         }

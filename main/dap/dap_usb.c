@@ -70,6 +70,7 @@
 #include "usbd_cdc_acm.h"   /* composite: the CDC side, same as CherryDAP */
 
 #include "pinout.h"
+#include "debug_pins.h"    /* debug_pins_init(): expansion-IO ownership */
 #include "DAP.h"
 #include "DAP_config.h"
 #include "dap_usb.h"
@@ -882,6 +883,16 @@ esp_err_t dap_usb_start(void)
         ESP_LOGE(TAG, "USB PHY is held by the TTL bridge - reboot to switch");
         return ESP_ERR_INVALID_STATE;
     }
+
+    /* Claim the expansion-header debug IOs (TDI/TDO/nTRST/SWO) before any pad
+     * is configured. This lives here, not at the boot call site, because the
+     * probe can also be enabled at runtime from /api/usb_dap, /api/usb_mode and
+     * the OLED Config page - all of which land in this function. With the
+     * default pin map the I2C monitor owns IO39/IO40, so without this the
+     * monitor would keep driving pads that the probe and the SWO UART then
+     * take over: JTAG/SWO fail and the monitor breaks silently.
+     * debug_pins_init() is idempotent. */
+    debug_pins_init();
 
     /* Build the serial number while we are still in task context: the string
      * callback runs from the USB interrupt. */

@@ -66,6 +66,20 @@ static int ws_count_clients(void)
 
 int ws_client_count(void) { return s_clients; }
 
+/* Recompute the attached-client count from the httpd session table.
+ *
+ * This cannot be done from the handshake path: esp_http_server answers a
+ * WebSocket upgrade itself and returns WITHOUT invoking uri->handler
+ * (httpd_uri.c: "If the request is websocket handshake, then do not call the
+ * uri->handler"), so the old code's ws_get_handler() branch that set s_clients
+ * was unreachable - and because ws_send() refused to enqueue while s_clients
+ * was 0, the gate never opened and no frame was ever sent. The count is
+ * therefore refreshed here, from the broadcast path. */
+static void ws_refresh_clients(void)
+{
+    s_clients = ws_count_clients();
+}
+
 static void ws_send_all(const uint8_t *data, size_t len, httpd_ws_type_t type)
 {
     int fds[CONFIG_LWIP_MAX_SOCKETS];
@@ -99,11 +113,46 @@ static void ws_send_all(const uint8_t *data, size_t len, httpd_ws_type_t type)
 /*  Producers                                                          */
 /* ------------------------------------------------------------------ */
 
+/* Queue one data frame. The direction byte is PREPENDED here, in the producer,
+ * so that ws_task can write it.buf/it.len straight to the socket: the frame on
+ * the wire is [dir][payload...] and the payload itself stays unmodified.
+ *
+ * This prefix is part of the documented protocol (README "WebSocket 实时推送"
+ * and tools/ws_console.py) - without it a client that splits on msg[0] eats the
+ * first byte of every UART burst and cannot tell RX from TX. */
+static esp_err_t ws_send_data(int dir, const uint8_t *data, size_t len)
+{
+    if (!s_queue || len == 0 || len + 1 > WS_PAYLOAD_MAX) return ESP_ERR_INVALID_ARG;
+
+    if (s_clients <= 0) {
+        ws_refresh_clients();
+        if (s_clients <= 0) return ESP_OK;
+    }
+
+    ws_item_t it;
+    it.dir = dir;
+    it.len = (int)len + 1;
+    it.buf[0] = (uint8_t)dir;
+    memcpy(it.buf + 1, data, len);
+    if (xQueueSend(s_queue, &it, 0) != pdTRUE) {
+        ESP_LOGD(TAG, "broadcast queue full, frame dropped");
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
 static esp_err_t ws_send(int dir, const uint8_t *data, size_t len)
 {
     if (!s_queue || !len || len > WS_PAYLOAD_MAX) return ESP_ERR_INVALID_ARG;
-    /* Nothing attached: skip the copy and the queue entirely. */
-    if (s_clients <= 0) return ESP_OK;
+
+    /* Nothing attached: skip the ~1 kB copy and the queue entirely. The count
+     * cannot be maintained by the handshake path, so refresh it here, but only
+     * while it is still zero - once a client is known to be attached the
+     * ws_send_all() call that follows each drain keeps it accurate. */
+    if (s_clients <= 0) {
+        ws_refresh_clients();
+        if (s_clients <= 0) return ESP_OK;
+    }
 
     ws_item_t it;
     it.dir = dir;
@@ -120,10 +169,12 @@ esp_err_t ws_broadcast_data(int dir, const uint8_t *data, size_t len)
 {
     if (!s_task) return ESP_ERR_INVALID_STATE;
     /* Oversized runs are split instead of dropped, so a long log line still
-     * reaches the browser in order. */
+     * reaches the browser in order. One byte of each frame is the direction
+     * prefix, hence WS_PAYLOAD_MAX - 1. */
+    const size_t chunk = WS_PAYLOAD_MAX - 1;
     while (len) {
-        size_t n = (len > WS_PAYLOAD_MAX) ? WS_PAYLOAD_MAX : len;
-        if (ws_send(dir, data, n) != ESP_OK) return ESP_ERR_NO_MEM;
+        size_t n = (len > chunk) ? chunk : len;
+        if (ws_send_data(dir, data, n) != ESP_OK) return ESP_ERR_NO_MEM;
         data += n;
         len  -= n;
     }
@@ -226,13 +277,12 @@ static esp_err_t ws_handle_cmd(const char *cmd, const char *val, const char *raw
          * something on screen before the first data byte arrives. */
         char ip[16] = {0};
         wifi_manager_get_ip_str(ip, sizeof(ip));
-        uint32_t baud = 0;
         char j[256];
         snprintf(j, sizeof(j),
                  "{\"t\":\"status\",\"ip\":\"%s\",\"baud\":%lu,"
                  "\"rx\":%lu,\"tx\":%lu,\"cap\":%u,\"capcap\":%u,\"dropped\":%s}",
                  ip,
-                 (unsigned long)baud,
+                 (unsigned long)serial_bridge_get_baud(),
                  (unsigned long)serial_bridge_get_rx_count(),
                  (unsigned long)serial_bridge_get_tx_count(),
                  (unsigned)capture_count(), (unsigned)capture_capacity(),
@@ -242,14 +292,30 @@ static esp_err_t ws_handle_cmd(const char *cmd, const char *val, const char *raw
     }
 
     if (!strcmp(cmd, "capture")) {
-        /* Dump a slice of the timestamped log on demand. Kept small: each
-         * entry becomes one text frame, and the client pages with `since`. */
+        /* Dump a slice of the timestamped log on demand.
+         *
+         * "v" is the batch size; an optional "since" is the paging cursor the
+         * client echoes back from the previous reply's "next". Without that
+         * key the command could only ever return the oldest retained chunks
+         * (capture_read clamps an unknown cursor up to the oldest seq), so it
+         * could never page forward.
+         *
+         * The lines go out as TEXT frames (dir = -1), matching the documented
+         * protocol: binary frames carry raw UART bytes with a direction prefix
+         * and would be mangled by a client that routes them to the RX path. */
         int max = val ? atoi(val) : 20;
         if (max <= 0 || max > 32) max = 32;
 
+        uint32_t since = 0;
+        const char *sp = strstr(raw, "\"since\"");
+        if (sp) {
+            sp = strchr(sp, ':');
+            if (sp) since = (uint32_t)strtoul(sp + 1, NULL, 10);
+        }
+
         static capture_chunk_t chunks[32];
-        uint32_t next = 0;
-        size_t n = capture_read(0, chunks, (size_t)max, &next);
+        uint32_t next = since;
+        size_t n = capture_read(since, chunks, (size_t)max, &next);
 
         char hdr[128];
         snprintf(hdr, sizeof(hdr),
@@ -270,7 +336,9 @@ static esp_err_t ws_handle_cmd(const char *cmd, const char *val, const char *raw
             }
             line[p++] = '\n';
             line[p]   = '\0';
-            ws_send(0, (const uint8_t *)line, (size_t)p);
+            /* dir = -1 selects a TEXT frame; these are formatted log lines,
+             * not raw UART bytes. */
+            ws_send(-1, (const uint8_t *)line, (size_t)p);
         }
         return ESP_OK;
     }
@@ -311,14 +379,13 @@ static esp_err_t ws_handle_cmd(const char *cmd, const char *val, const char *raw
 
 static esp_err_t ws_get_handler(httpd_req_t *req)
 {
-    if (req->method == HTTP_GET) {
-        /* Handshake. This handler is also invoked for every subsequent data
-         * frame, but those arrive as HTTP_POST (see httpd_uri_t below). */
-        ESP_LOGI(TAG, "client connected");
-        s_clients = ws_count_clients();
-        return ESP_OK;
-    }
-
+    /* This handler runs ONLY for WebSocket data frames, never for the upgrade
+     * itself: esp_http_server answers the handshake internally and returns
+     * without calling uri->handler (httpd_uri.c). The frame arrives with
+     * req->method == HTTP_DELETE (0) because the WebSocket request line carries
+     * no method; a plain HTTP GET cannot reach here, so no method check is
+     * needed - and the old `if (req->method == HTTP_GET)` branch was dead code
+     * that also happened to be the only place the client count was ever set. */
     char buf[WS_PAYLOAD_MAX];
 
     httpd_ws_frame_t frame = { .type = HTTPD_WS_TYPE_TEXT, .payload = NULL };
@@ -384,10 +451,6 @@ static esp_err_t ws_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-/* Data frames are delivered as HTTP_POST to the same URI, so the endpoint has
- * to be registered twice with identical handlers. */
-static esp_err_t ws_post_handler(httpd_req_t *req) { return ws_get_handler(req); }
-
 /* ------------------------------------------------------------------ */
 /*  Startup                                                            */
 /* ------------------------------------------------------------------ */
@@ -401,9 +464,39 @@ esp_err_t ws_server_start(void *httpd_handle)
     if (!httpd_handle) return ESP_ERR_INVALID_ARG;
     s_server = (httpd_handle_t)httpd_handle;
 
+    /* Register BEFORE allocating anything.
+     *
+     * esp_http_server installs handlers into a fixed hd_calls[] array sized by
+     * httpd_config_t.max_uri_handlers and fails with ESP_ERR_HTTPD_HANDLERS_FULL
+     * once no slot is free - which is exactly what silently happened before:
+     * http_status.c already registered 31 handlers with max_uri_handlers = 31,
+     * so /ws was the 32nd and never installed, while the queue and task created
+     * below still made ws_is_running() report success. Registering first means
+     * a failure leaves no resources behind and is impossible to misread.
+     *
+     * Only the GET route is registered. esp_http_server performs the handshake
+     * itself for uri->method == HTTP_GET and then dispatches every later frame
+     * through the handler pointer captured at handshake time
+     * (aux->sd->ws_handler = uri->handler), so a POST route can never be
+     * reached. One slot is all this feature needs. */
+    static const httpd_uri_t uri_ws_get = {
+        .uri = WS_PATH, .method = HTTP_GET, .handler = ws_get_handler,
+        .is_websocket = true,
+    };
+
+    esp_err_t e = httpd_register_uri_handler(s_server, &uri_ws_get);
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "register %s failed: %s (raise cfg.max_uri_handlers?)",
+                 WS_PATH, esp_err_to_name(e));
+        s_server = NULL;
+        return e;
+    }
+
     s_queue = xQueueCreate(WS_QUEUE_LEN, sizeof(ws_item_t));
     if (!s_queue) {
         ESP_LOGE(TAG, "queue allocation failed");
+        httpd_unregister_uri_handler(s_server, WS_PATH, HTTP_GET);
+        s_server = NULL;
         return ESP_ERR_NO_MEM;
     }
 
@@ -411,27 +504,9 @@ esp_err_t ws_server_start(void *httpd_handle)
         ESP_LOGE(TAG, "task creation failed");
         vQueueDelete(s_queue);
         s_queue = NULL;
+        httpd_unregister_uri_handler(s_server, WS_PATH, HTTP_GET);
+        s_server = NULL;
         return ESP_ERR_NO_MEM;
-    }
-
-    static const httpd_uri_t uri_ws_get = {
-        .uri = WS_PATH, .method = HTTP_GET, .handler = ws_get_handler,
-        .is_websocket = true,
-    };
-    static const httpd_uri_t uri_ws_post = {
-        .uri = WS_PATH, .method = HTTP_POST, .handler = ws_post_handler,
-        .is_websocket = true,
-    };
-
-    esp_err_t e = httpd_register_uri_handler(s_server, &uri_ws_get);
-    if (e != ESP_OK) {
-        ESP_LOGE(TAG, "register GET %s failed: %s", WS_PATH, esp_err_to_name(e));
-        return e;
-    }
-    e = httpd_register_uri_handler(s_server, &uri_ws_post);
-    if (e != ESP_OK) {
-        ESP_LOGE(TAG, "register POST %s failed: %s", WS_PATH, esp_err_to_name(e));
-        return e;
     }
 
     ESP_LOGI(TAG, "WebSocket endpoint ready at %s (port 80)", WS_PATH);

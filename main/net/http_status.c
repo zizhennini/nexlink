@@ -1737,10 +1737,19 @@ esp_err_t http_status_start(void)
 {
     httpd_handle_t server = NULL;
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 31;
+    /* 31 REST routes are registered below, plus /ws from ws_server_start().
+     * The limit must cover both: esp_http_server fails a registration with
+     * ESP_ERR_HTTPD_HANDLERS_FULL once hd_calls[] has no free slot, which
+     * silently made the WebSocket endpoint unreachable (404) when this was set
+     * to exactly 31. One slot of headroom is kept for future routes. */
+    cfg.max_uri_handlers = 34;
     cfg.stack_size = 8192;
     cfg.recv_wait_timeout = 10;
-    cfg.send_wait_timeout = 10;
+    /* HTTPD_DEFAULT_CONFIG() uses 5 s here, and the WebSocket broadcast task
+     * writes through this socket layer: a browser that stops reading (closed
+     * tab, stalled TCP window) would otherwise hold the single ws_tx task in
+     * send() for 5 s, starving every other client. */
+    cfg.send_wait_timeout = 2;
 
     esp_err_t err = httpd_start(&server, &cfg);
     if (err != ESP_OK) {

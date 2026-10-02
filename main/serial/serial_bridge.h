@@ -35,6 +35,11 @@ size_t serial_bridge_write(const uint8_t *buf, size_t len);
 /* Change baud rate at runtime. */
 esp_err_t serial_bridge_set_baud(uint32_t baudrate);
 
+/* Read back the UART's actual baud rate (0 when the bridge is not up or the
+ * driver refuses the query). Useful for anything that reports state, e.g. the
+ * WebSocket "status" message, which previously hard-coded 0. */
+uint32_t serial_bridge_get_baud(void);
+
 /* Recreate the RX stream buffer with a new size (bytes). Buffered data is lost. */
 esp_err_t serial_bridge_set_bufsize(size_t bytes);
 
