@@ -15,6 +15,7 @@
 #include "freertos/task.h"
 #include "pinout.h"
 #include "oled_ssd1306.h"
+#include "boot_splash.h"
 #include "menu_ui.h"
 #include "wifi_manager.h"
 #include "serial_bridge.h"
@@ -116,6 +117,11 @@ void app_main(void)
     }
     menu_init();
 
+    /* Power-on animation. It runs before the network comes up, so it shows a
+     * progress sweep rather than an address; the splash is skipped entirely
+     * when there is no panel so a headless boot is not delayed. */
+    if (oled_is_ready()) boot_splash_run(NULL, 900);
+
     wifi_manager_init();
     pin_config_init();
     /* Allocate the capture ring before the serial bridge starts producing
@@ -187,6 +193,17 @@ void app_main(void)
         }
     } else {
         ESP_LOGI(TAG, "USB off: IO19/IO20 free (Config page or /api/usb_mode to pick DAP/TTL)");
+    }
+
+    /* The network is up by now, so replace the generic sweep with a "ready"
+     * card carrying the address - that is the one thing the user needs to read
+     * off the panel. It is shown for a moment and then the menu task (started
+     * just below) takes the panel over. */
+    if (oled_is_ready()) {
+        char ip[16] = {0};
+        wifi_manager_get_ip_str(ip, sizeof(ip));
+        boot_splash_ready(ip[0] ? ip : NULL);
+        vTaskDelay(pdMS_TO_TICKS(1200));
     }
 
     xTaskCreate(ui_task, "ui", 8192, NULL, 5, NULL);

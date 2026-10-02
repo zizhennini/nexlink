@@ -9,6 +9,7 @@ idf_component_register(SRCS
                        "buttons/buttons.c"
                        "display/oled_ssd1306.c"
                        "display/menu_ui.c"
+                       "display/boot_splash.c"
                        "display/cjk_font.c"
                        "net/tcp_server.c"
                        "net/http_status.c"

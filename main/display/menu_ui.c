@@ -70,6 +70,12 @@ static const char *TAG = "menu";
 
 /* ------------------------------------------------------------------ */
 /*  Layout                                                             */
+/*                                                                     */
+/*  The font cell is 16px tall, so the panel holds exactly four text    */
+/*  rows from y=0 to y=48 (48+16 = 64 = the last pixel row). The layout */
+/*  is therefore: title bar on row 0, up to THREE content rows, and the */
+/*  key hint as the fourth row. Anything drawn below y=48 is clipped -  */
+/*  an earlier revision put the hint at y=55 and lost its bottom third. */
 /* ------------------------------------------------------------------ */
 
 #define ROW_TITLE_Y   0
@@ -77,8 +83,11 @@ static const char *TAG = "menu";
 #define ROW2_Y        32
 #define ROW3_Y        48
 
-/* Text lines available on a screen body (below the title bar). */
-#define BODY_ROWS     4
+/* Content rows available below the title, leaving row 3 for the hint. */
+#define BODY_ROWS     3
+
+/* Text columns that actually fit (128px / 8px per cell). */
+#define TEXT_COLS     16
 
 /* ------------------------------------------------------------------ */
 /*  RX line history (fed by the serial bridge callback)                */
@@ -487,30 +496,53 @@ void menu_push_tx_data(const uint8_t *data, uint32_t len) { push_serial_data('<'
 
 static void page_header(const char *title)
 {
-    oled_text(0, ROW_TITLE_Y, title, false);
-    oled_hline(0, ROW_TITLE_Y + 14, OLED_WIDTH, true);
+    char line[TEXT_COLS + 1];
+    /* Truncate explicitly: oled_text() draws whatever it is given, straight
+     * past the right edge of the panel. */
+    snprintf(line, sizeof(line), "%-*.*s", TEXT_COLS, TEXT_COLS, title);
+    oled_text(0, ROW_TITLE_Y, line, false);
+    oled_hline(0, ROW_TITLE_Y + 15, OLED_WIDTH, true);
 }
 
+/* One "key value" line. The key gets 6 columns, the value the remaining 9. */
 static void row_kv(int y, const char *key, const char *value)
 {
-    char line[32];
-    snprintf(line, sizeof(line), "%-7s%.15s", key, value);
+    char line[TEXT_COLS + 1];
+    snprintf(line, sizeof(line), "%-6.6s%.10s", key, value);
+    line[TEXT_COLS] = '\0';
     oled_text(0, y, line, false);
 }
 
-/* Footer hint, so the key model is discoverable without the manual. The
- * buffer is deliberately wider than the 16 columns the panel shows: the
- * project builds with -Werror=format-truncation, so every caller must be able
- * to prove its formatted text fits. */
+/* Key hint on the bottom row (y=48). Text is padded to the full width so a
+ * shorter hint does not leave tail characters from the previous screen. */
 static void footer(const char *hint)
 {
-    char line[24];
-    snprintf(line, sizeof(line), "%-16.16s", hint);
-    oled_text(0, 55, line, false);
+    char line[TEXT_COLS + 1];
+    snprintf(line, sizeof(line), "%-*.*s", TEXT_COLS, TEXT_COLS, hint);
+    oled_text(0, ROW3_Y, line, false);
+}
+
+/* Centred line, for hint/status text that is shorter than the panel. */
+static void centered(int y, const char *text)
+{
+    int n = (int)strlen(text);
+    if (n > TEXT_COLS) n = TEXT_COLS;
+    int x = (OLED_WIDTH - n * OLED_CHAR_W) / 2;
+    if (x < 0) x = 0;
+    char line[TEXT_COLS + 1];
+    snprintf(line, sizeof(line), "%.*s", TEXT_COLS, text);
+    oled_text(x, y, line, false);
 }
 
 /* ================================================================== */
 /*  Read-only screens                                                  */
+/*                                                                    */
+/*  Layout contract for every screen:                                  */
+/*    y=16, y=32   two rows of key/value detail                        */
+/*    y=48         hint row (footer) - never long body text            */
+/*  Three content rows plus a hint would need a fifth row, which the   */
+/*  panel does not have. A screen that genuinely needs a third value   */
+/*  line uses compact() to fold it into row 2.                         */
 /* ================================================================== */
 
 static void screen_status(void)
@@ -519,20 +551,15 @@ static void screen_status(void)
     page_header("Device Status");
 
     uint32_t s = (uint32_t)(esp_timer_get_time() / 1000000);
-    snprintf(v, sizeof(v), "%luh%02lum", (unsigned long)(s / 3600),
-             (unsigned long)((s / 60) % 60));
+    snprintf(v, sizeof(v), "%luh%02lum  baud %lu", (unsigned long)(s / 3600),
+             (unsigned long)((s / 60) % 60), (unsigned long)serial_bridge_get_baud());
     row_kv(ROW1_Y, "Up", v);
 
-    snprintf(v, sizeof(v), "%lu/%lu", (unsigned long)serial_bridge_get_rx_count(),
-             (unsigned long)serial_bridge_get_tx_count());
+    snprintf(v, sizeof(v), "%lu/%lu tcp%u", (unsigned long)serial_bridge_get_rx_count(),
+             (unsigned long)serial_bridge_get_tx_count(),
+             (unsigned)tcp_server_client_count());
     row_kv(ROW2_Y, "RX/TX", v);
 
-    snprintf(v, sizeof(v), "%lu", (unsigned long)serial_bridge_get_baud());
-    row_kv(ROW3_Y, "Baud", v);
-
-    snprintf(v, sizeof(v), "tcp%u cap%u", (unsigned)tcp_server_client_count(),
-             (unsigned)capture_count());
-    oled_text(0, 48, v, false);
     footer("SW2=back");
 }
 
@@ -546,27 +573,24 @@ static void screen_net(void)
     page_header("Network");
     row_kv(ROW1_Y, "State", st == WIFI_STATE_CONNECTED_STA ? "STA" :
                            st == WIFI_STATE_AP_MODE        ? "AP"  : "down");
-    row_kv(ROW2_Y, "IP", ip);
 
     if (st == WIFI_STATE_CONNECTED_STA) {
         wifi_ap_record_t ar;
         if (esp_wifi_sta_get_ap_info(&ar) == ESP_OK) {
             ar.ssid[sizeof(ar.ssid) - 1] = '\0';
-            /* Precision bound: an SSID can be 32 bytes, the panel only shows
-             * 15 columns after the key field, and -Werror=format-truncation
-             * must be able to prove the result fits. */
-            snprintf(ssid, sizeof(ssid), "%.15s", (char *)ar.ssid);
+            snprintf(ssid, sizeof(ssid), "%.9s", (char *)ar.ssid);
             rssi = ar.rssi;
         }
     }
-    row_kv(ROW3_Y, "SSID", ssid);
-    snprintf(v, sizeof(v), "rssi %d dBm", rssi);
-    oled_text(0, 48, v, false);
-    footer("SW2=back");
+    snprintf(v, sizeof(v), "%s %ddBm", ip, rssi);
+    row_kv(ROW2_Y, "IP", v);
+
+    footer(ssid);
 }
 
 static void screen_firmware(void)
 {
+    char v[24];
     page_header("Firmware");
 
     const esp_partition_t *run = esp_ota_get_running_partition();
@@ -576,9 +600,9 @@ static void screen_firmware(void)
     esp_ota_img_states_t st;
     if (run && esp_ota_get_state_partition(run, &st) == ESP_OK &&
         st == ESP_OTA_IMG_PENDING_VERIFY) s = "pending";
-    row_kv(ROW2_Y, "State", s);
-    row_kv(ROW3_Y, "Reset", main_boot_reason());
-    oled_text(0, 48, "OTA: POST /api/ota", false);
+    snprintf(v, sizeof(v), "%s %s", s, main_boot_reason());
+    row_kv(ROW2_Y, "State", v);
+
     footer("SW2=back");
 }
 
@@ -594,17 +618,16 @@ static void screen_usb(void)
     page_header("USB Role");
 
     uint8_t m = pin_config_usb_mode();
-    row_kv(ROW1_Y, "Role", mode_s[m <= USB_MODE_TTL ? m : 0]);
-    snprintf(v, sizeof(v), "%u", (unsigned)dap_usb_configured_count());
-    row_kv(ROW2_Y, "DAPcfg", v);
+    snprintf(v, sizeof(v), "%s cfg%u", mode_s[m <= USB_MODE_TTL ? m : 0],
+             (unsigned)dap_usb_configured_count());
+    row_kv(ROW1_Y, "Role", v);
+
     snprintf(v, sizeof(v), "%lu/%lu", (unsigned long)dap_usb_get_rx_packets(),
              (unsigned long)dap_usb_get_tx_packets());
-    row_kv(ROW3_Y, "DAP io", v);
+    row_kv(ROW2_Y, "DAPio", v);
 
     debug_pins_report(dbg, sizeof(dbg));
-    snprintf(v, sizeof(v), "dbgIO %.15s", debug_pins_claimed() ? dbg : "none");
-    oled_text(0, 48, v, false);
-    footer("SW2=back");
+    footer(debug_pins_claimed() ? dbg : "no debug IO");
 }
 
 static void screen_swd(void)
@@ -613,15 +636,12 @@ static void screen_swd(void)
     page_header("SWD / JTAG");
 
     row_kv(ROW1_Y, "SWD", "12/13/14");
-    row_kv(ROW2_Y, "JTAG", "48/38/39");
-    row_kv(ROW3_Y, "SWO", "IO40");
+    snprintf(v, sizeof(v), "48/38/39 swo40");
+    row_kv(ROW2_Y, "JTAG", v);
 
-    if (s_swd_idcode_valid)
-        snprintf(v, sizeof(v), "ID 0x%08lX", (unsigned long)s_swd_idcode);
-    else
-        snprintf(v, sizeof(v), "ID fail ack%d", s_swd_last_err);
-    oled_text(0, 48, v, false);
-    footer("SW2=back");
+    if (s_swd_idcode_valid) snprintf(v, sizeof(v), "ID 0x%08lX", (unsigned long)s_swd_idcode);
+    else                    snprintf(v, sizeof(v), "ID fail ack%d", s_swd_last_err);
+    footer(v);
 }
 
 static void screen_pwm(void)
@@ -631,10 +651,8 @@ static void screen_pwm(void)
     page_header("PWM");
 
     pwm_mon_get(&f, &d);
-    snprintf(v, sizeof(v), "%.1f Hz", (double)f);
-    row_kv(ROW1_Y, "InFreq", v);
-    snprintf(v, sizeof(v), "%.1f %%", (double)d);
-    row_kv(ROW2_Y, "InDuty", v);
+    snprintf(v, sizeof(v), "%.1fHz %.1f%%", (double)f, (double)d);
+    row_kv(ROW1_Y, "Input", v);
 
     if (pwm_out_running()) {
         pwm_out_get(&f, &d);
@@ -642,57 +660,51 @@ static void screen_pwm(void)
     } else {
         snprintf(v, sizeof(v), "stopped");
     }
-    row_kv(ROW3_Y, "Out", v);
+    row_kv(ROW2_Y, "Output", v);
+
     footer("SW2=back");
 }
 
 static void screen_spi(void)
 {
-    char v[24];
+    char v[24], line[TEXT_COLS + 1];
     page_header("SPI Bus");
 
-    snprintf(v, sizeof(v), "%lu", (unsigned long)spi_mon_get_count());
+    snprintf(v, sizeof(v), "%lu  to%lu", (unsigned long)spi_mon_get_count(),
+             (unsigned long)spi_mon_get_timeouts());
     row_kv(ROW1_Y, "Count", v);
-    snprintf(v, sizeof(v), "%lu", (unsigned long)spi_mon_get_timeouts());
-    row_kv(ROW2_Y, "Timeouts", v);
-    row_kv(ROW3_Y, "State", spi_mon_running() ? "run" : "stop");
+    row_kv(ROW2_Y, "State", spi_mon_running() ? "capturing" : "stopped");
 
-    /* Newest captured transaction, hex, truncated to the panel width. */
+    /* Newest captured transaction, hex, truncated to the panel. */
     static spi_txn_t h[1];
     if (spi_mon_get_history(h, 1) == 1 && h[0].len > 0) {
-        char line[19];
         int p = 0;
-        for (int i = 0; i < h[0].len && p < 16; i++)
+        for (int i = 0; i < h[0].len && p < 12; i++)
             p += snprintf(line + p, sizeof(line) - p, "%02X", h[0].mosi[i]);
-        oled_text(0, 48, "M:", false);
-        oled_text(16, 48, line, false);
+        footer(line);
     } else {
-        oled_text(0, 48, "no transactions", false);
+        footer("no transactions");
     }
-    footer("SW2=back");
 }
 
 static void screen_i2c(void)
 {
-    char v[24], line[24];
+    char v[24], line[TEXT_COLS + 1];
     page_header("I2C Bus");
 
-    snprintf(v, sizeof(v), "%lu", (unsigned long)i2c_mon_get_count());
+    snprintf(v, sizeof(v), "%lu  isr%lu", (unsigned long)i2c_mon_get_count(),
+             (unsigned long)i2c_mon_get_isr_count());
     row_kv(ROW1_Y, "Count", v);
-    snprintf(v, sizeof(v), "%lu", (unsigned long)i2c_mon_get_isr_count());
-    row_kv(ROW2_Y, "ISR", v);
-    row_kv(ROW3_Y, "Mode", i2c_mon_mode() == I2C_MON_SLAVE ? "slave" : "passive");
+    row_kv(ROW2_Y, "Mode", i2c_mon_mode() == I2C_MON_SLAVE ? "slave" : "passive");
 
     i2c_txn_t h[1];
-    int n = i2c_mon_get_history(h, 1);
-    if (n == 1) {
+    if (i2c_mon_get_history(h, 1) == 1) {
         snprintf(line, sizeof(line), "a%02X %s len%d", h[0].addr,
                  h[0].read ? "R" : "W", h[0].len);
-        oled_text(0, 48, line, false);
+        footer(line);
     } else {
-        oled_text(0, 48, "no transactions", false);
+        footer("no transactions");
     }
-    footer("SW2=back");
 }
 
 static void screen_capture(void)
@@ -703,32 +715,32 @@ static void screen_capture(void)
     snprintf(v, sizeof(v), "%u/%u", (unsigned)capture_count(),
              (unsigned)capture_capacity());
     row_kv(ROW1_Y, "Chunks", v);
-    snprintf(v, sizeof(v), "%lu", (unsigned long)capture_oldest_seq());
-    row_kv(ROW2_Y, "Oldest", v);
-    snprintf(v, sizeof(v), "%lu", (unsigned long)capture_next_seq());
-    row_kv(ROW3_Y, "Next", v);
-    snprintf(v, sizeof(v), "%s %u B", capture_dropped() ? "WRAPPED" : "ok",
+
+    snprintf(v, sizeof(v), "%lu..%lu", (unsigned long)capture_oldest_seq(),
+             (unsigned long)capture_next_seq());
+    row_kv(ROW2_Y, "Seq", v);
+
+    snprintf(v, sizeof(v), "%s %uB", capture_dropped() ? "WRAPPED" : "ok",
              (unsigned)capture_bytes());
-    oled_text(0, 48, v, false);
-    footer("SW2=back");
+    footer(v);
 }
 
 static void screen_ai(void)
 {
+    char ip[16] = "-";
     page_header("AI / MCP");
+
     wifi_state_t st = wifi_manager_get_state();
     bool net = (st == WIFI_STATE_CONNECTED_STA || st == WIFI_STATE_AP_MODE);
-    row_kv(ROW1_Y, "MCP", net ? "ready" : "no net");
-
-    char ip[16] = "-";
     wifi_manager_get_ip_str(ip, sizeof(ip));
-    row_kv(ROW2_Y, "IP", ip);
-    row_kv(ROW3_Y, "Tools", "24");
-    oled_text(0, 48, "mcp/mcp_server.py", false);
-    footer("SW2=back");
+
+    row_kv(ROW1_Y, "MCP", net ? "ready" : "no net");
+    row_kv(ROW2_Y, "Tools", "24 over HTTP");
+    footer(ip);
 }
 
-/* Live serial monitor: the only screen with a scrollable body. */
+/* Live serial monitor: the only screen with a scrollable body. Uses all three
+ * content rows, so its hint replaces the third row when scrolling. */
 static void screen_rx(void)
 {
     page_header("RX Monitor");
@@ -744,11 +756,13 @@ static void screen_rx(void)
         int idx = start + row;
         if (idx >= n - s_scroll) break;
         int ring = ((s_rx_line_w - (n - 1) + idx) % s_rx_hist_max + s_rx_hist_max) % s_rx_hist_max;
-        oled_text(0, ROW1_Y + row * 16, s_rx_lines[ring], false);
+        char line[TEXT_COLS + 1];
+        snprintf(line, sizeof(line), "%-*.*s", TEXT_COLS, TEXT_COLS, s_rx_lines[ring]);
+        oled_text(0, ROW1_Y + row * 16, line, false);
     }
 
-    char hint[24];
-    if (s_scroll) snprintf(hint, sizeof(hint), "SCROLL %d  SW2=bk", s_scroll);
+    char hint[TEXT_COLS + 1];
+    if (s_scroll) snprintf(hint, sizeof(hint), "SCR%d  SW2=back", s_scroll);
     else          snprintf(hint, sizeof(hint), "%s  SW2=back",
                           s_rx_hex_mode ? "HEX" : "TXT");
     footer(hint);
@@ -773,12 +787,16 @@ static void render_list(void)
         int idx = first + row;
         if (idx >= l->count) break;
         char line[20];
-        snprintf(line, sizeof(line), "%c%-15.15s", idx == cur ? '>' : ' ',
-                 l->items[idx].label);
+        snprintf(line, sizeof(line), "%c%-*.*s", idx == cur ? '>' : ' ',
+                 TEXT_COLS - 1, TEXT_COLS - 1, l->items[idx].label);
         oled_text(0, ROW1_Y + row * 16, line, false);
     }
 
-    char hint[24];
+    /* Buffer wider than the panel on purpose: -Werror=format-truncation needs
+     * to prove the formatted text fits, and "%d/%d  SW2=ok" can be 14 columns
+     * for a 9-item list, which leaves no slack in a 17-byte buffer. footer()
+     * clips to 16 columns for display. */
+    char hint[32];
     snprintf(hint, sizeof(hint), "%d/%d  SW2=ok", cur + 1, l->count);
     footer(hint);
 }
@@ -786,18 +804,21 @@ static void render_list(void)
 static void render_edit(void)
 {
     const menu_entry_t *e = s_edit;
+    char line[TEXT_COLS + 1];
     char v[24];
 
     page_header(e->label);
 
+    /* The ">" marker matches how a list shows its cursor, so "this is the item
+     * you are changing" reads the same everywhere. (An inverted band was tried
+     * first and is not usable here: oled_invert_rect() XORs the framebuffer, so
+     * filling black and then inverting leaves the band exactly as it was.) */
     int idx = *e->u.val.idx;
     snprintf(v, sizeof(v), "%d %s", e->u.val.table[idx], e->u.val.unit);
-    /* Inverted so "this is what SW1/SW3 changes" is unmistakable. */
-    oled_fill_rect(0, ROW2_Y, OLED_WIDTH, 16, false);
-    oled_invert_rect(0, ROW2_Y, OLED_WIDTH, 16);
-    oled_text(0, ROW2_Y, v, false);
+    snprintf(line, sizeof(line), ">%-*.*s", TEXT_COLS - 1, TEXT_COLS - 1, v);
+    oled_text(0, ROW1_Y, line, false);
 
-    oled_text(0, ROW3_Y, "+/-  SW1 / SW3", false);
+    centered(ROW2_Y, "UP/DOWN changes it");
     footer("SW2=confirm");
 }
 
@@ -866,7 +887,8 @@ void menu_on_sw3_press(void) { nav_vertical(+1); }
 
 void menu_on_sw2_press(void)
 {
-    /* 1. Editing: confirm and leave the editor. */
+    /* 1. Editing: confirm. A value entry lives in a list, so returning to
+     * VIEW_LIST redraws that list with the new value in place. */
     if (edit_active()) {
         s_view = VIEW_LIST;
         s_edit = NULL;
@@ -874,7 +896,7 @@ void menu_on_sw2_press(void)
         return;
     }
 
-    /* 2. A screen: back to the list it was opened from. */
+    /* 2. A read-only screen: back to the list it was opened from. */
     if (s_view == VIEW_SCREEN) {
         s_view = VIEW_LIST;
         s_scroll = 0;
@@ -882,7 +904,22 @@ void menu_on_sw2_press(void)
         return;
     }
 
-    /* 3. A list: activate the highlighted entry. */
+    /* 3. In a list.
+     *
+     * At the ROOT, SW2 activates the highlighted entry. Inside a GROUP, SW2
+     * goes back up one level - without that the tree would be enter-only and
+     * the long-press escape would be the only way home.
+     *
+     * These two must not be swapped: an earlier revision checked
+     * "s_depth > 1" first, which made every second-level press "back", so no
+     * entry inside a group could ever be activated. */
+    if (s_depth > 1) {
+        s_depth--;
+        s_selected = s_cursor[s_depth - 1];
+        ui_kick();
+        return;
+    }
+
     const menu_list_t *l = s_stack[s_depth - 1];
     const menu_entry_t *e = &l->items[s_cursor[s_depth - 1]];
 
@@ -900,6 +937,10 @@ void menu_on_sw2_press(void)
         s_screen_page = e->u.page;
         s_scroll = 0;
         s_view = VIEW_SCREEN;
+        /* The cursor belongs to a list; a screen has none. Leaving the list's
+         * index in s_selected made /api/status report a meaningless "sel"
+         * while a screen was up. */
+        s_selected = 0;
         break;
 
     case ENTRY_ACTION:
@@ -914,6 +955,7 @@ void menu_on_sw2_press(void)
     }
 
     if (s_view == VIEW_LIST) s_selected = s_cursor[s_depth - 1];
+    else if (s_view == VIEW_SCREEN) s_selected = 0;
     ui_kick();
 }
 
@@ -1009,3 +1051,17 @@ int menu_get_current_page(void)
 }
 
 int menu_get_selected(void) { return s_selected; }
+
+void menu_get_state(char *buf, unsigned len)
+{
+    if (!buf || !len) return;
+
+    const char *view = (s_view == VIEW_EDIT)   ? "EDIT"   :
+                       (s_view == VIEW_SCREEN) ? "SCREEN" : "LIST";
+    const char *where;
+    if (s_view == VIEW_SCREEN)      where = "screen";
+    else if (s_view == VIEW_EDIT)   where = s_edit ? s_edit->label : "?";
+    else                            where = s_stack[s_depth - 1]->title;
+
+    snprintf(buf, len, "%s %s d%d sel=%d", view, where, s_depth, s_selected);
+}

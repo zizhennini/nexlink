@@ -15,11 +15,15 @@ extern "C" {
  * are read-only screens that a list entry can open. */
 typedef enum {
     MENU_HOME = 0,     /* root list: the four groups                       */
-    MENU_STATUS,       /* device state (uptime, baud, counters, tcp/http)  */
+
+    /* Read-only / self-contained screens. Every id here must be unique: the
+     * HTTP layer reports it verbatim as /api/status "page", so two surfaces
+     * sharing a value would make the field ambiguous. */
+    MENU_STATUS,       /* device state (uptime, baud, counters)            */
     MENU_RX_MON,       /* live serial monitor                              */
     MENU_SWD,          /* SWD/JTAG pins + last IDCODE read                 */
     MENU_CONFIG,       /* kept for API compatibility (see README)          */
-    MENU_PWM,          /* PWM frequency + duty                             */
+    MENU_PWM,          /* PWM input + LEDC output                          */
     MENU_SPI,          /* SPI captured transactions                        */
     MENU_I2C,          /* I2C captured transactions                        */
     MENU_AI,           /* MCP readiness                                    */
@@ -27,10 +31,13 @@ typedef enum {
     MENU_NET,          /* WiFi / IP / RSSI                                 */
     MENU_FIRMWARE,     /* firmware slot / OTA state / reset reason         */
     MENU_USB_STATE,    /* USB-C role and DAP counters                      */
-    MENU_LIST_MONITOR, /* the "监视" list level                            */
-    MENU_LIST_PROBE,   /* the "探针" list level                            */
-    MENU_LIST_SYSTEM,  /* the "系统" list level                            */
-    MENU_LIST_INFO,    /* the "信息" list level                            */
+
+    /* List levels of the tree. */
+    MENU_LIST_MONITOR,
+    MENU_LIST_PROBE,
+    MENU_LIST_SYSTEM,
+    MENU_LIST_INFO,
+
     MENU_COUNT
 } menu_page_t;
 
@@ -70,6 +77,11 @@ void menu_ui_wait(int ms);
 /* ---- Introspection (used by the HTTP status API) ---- */
 int  menu_get_current_page(void);
 int  menu_get_selected(void);
+
+/* Menu state as text, for /api/status and for debugging the key model on a
+ * headless board: "view=LIST TITLE sel=2". The page id alone cannot
+ * distinguish an editor from the list it was opened from. */
+void menu_get_state(char *buf, unsigned len);
 int  menu_get_rx_hist_n(void);
 int  menu_get_rx_hist_max(void);
 void menu_set_rx_hist_max(int m);

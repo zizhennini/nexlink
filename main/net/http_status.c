@@ -469,7 +469,13 @@ static esp_err_t status_api_handler(httpd_req_t *req)
     char debug_io[24];
     debug_pins_report(debug_io, sizeof(debug_io));
 
-    char json[704];
+    /* Menu state as text. The numeric "page" id cannot distinguish an editor
+     * from the list it was opened from, which makes the key model impossible
+     * to verify on a board whose screen nobody can see. */
+    char menustate[48];
+    menu_get_state(menustate, sizeof(menustate));
+
+    char json[768];
     snprintf(json, sizeof(json),
              "{\"wifi\":\"%s\",\"ip\":\"%s\",\"ssid\":\"%s\",\"rssi\":%d,"
              "\"baud\":%lu,\"rx\":%lu,\"tx\":%lu,"
@@ -478,6 +484,7 @@ static esp_err_t status_api_handler(httpd_req_t *req)
              "\"dapcfg\":%lu,\"daprx\":%lu,\"daptx\":%lu,"
              "\"ttl_to_dut\":%lu,\"ttl_to_host\":%lu,"
              "\"debug\":%d,\"debug_io\":\"%s\","
+             "\"menu\":\"%s\","
              "\"slot\":\"%s\",\"ota\":\"%s\"}",
              wstate, ipbuf, ssid, rssi, (unsigned long)baud,
              (unsigned long)serial_bridge_get_rx_count(),
@@ -493,6 +500,7 @@ static esp_err_t status_api_handler(httpd_req_t *req)
              (unsigned long)usb_ttl_get_to_dut(),
              (unsigned long)usb_ttl_get_to_host(),
              debug_pins_claimed() ? 1 : 0, debug_io,
+             menustate,
              run ? run->label : "?", ostate_s);
 
     httpd_resp_set_type(req, "application/json");
