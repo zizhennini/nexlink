@@ -81,6 +81,26 @@ RX Monitor · I2C Bus · SPI Bus · PWM · SWD/DAP · Status · Config · AI/MCP
 - **编辑态 5 秒无操作自动退出**，避免忘记按键手势
 - **无面板也能用**：OLED 初始化失败仅告警，所有功能仍可通过网络访问
 
+### 🕒 带时间戳的抓包历史
+
+`/api/data` 是"读走即消费"的裸字节流——没有时间、没有方向，轮询一次就没了。
+抓包模块（[`main/capture.c`](main/capture.c)）另外维护一份**有界环形历史**：
+
+- **微秒级时间戳 + 方向标记**（rx = 目标→主机，tx = 主机→目标）
+- 按**数据块**记录，不是按字节：8 字节开销对应最多 128 字节负载
+- 默认 **256 条 / ≈35 KB**，写满后自动覆盖最旧的（`dropped` 标志会告诉你）
+- 可通过 `?since=` 游标**反复分页读取同一段历史**，不是破坏性读取
+- 导出 CSV：`seq,uptime_ms,delta_ms,dir,len,data`，`delta_ms` 直接给出报文的相对间隔
+
+```bash
+# 看最近 32 条（文本）
+curl "http://<IP>/api/capture?max=32"
+# 导出 CSV（十六进制数据），用 Excel / Python 排时序
+curl "http://<IP>/api/capture?since=0&max=96&fmt=csv" -o capture.csv
+# 只取摘要，判断有没有新数据
+curl "http://<IP>/api/capture?want=meta"
+```
+
 ### 🚀 OTA 无线升级 + 自动回滚
 
 - 双 OTA 槽（各 4 MB）+ `otadata`，`POST /api/ota` 把固件写入**非活动槽**后自动重启
@@ -109,7 +129,7 @@ RX Monitor · I2C Bus · SPI Bus · PWM · SWD/DAP · Status · Config · AI/MCP
 ### 🤖 AI 集成（MCP Server）
 
 纯主机侧 Python 程序，通过 HTTP 调用设备 `/api/*`，**不占用串口通道、不干扰 Web 页面**。
-21 个工具覆盖连接、串口收发、PWM/SPI/I2C 读写、引脚排列、按键模拟、USB 角色、目标复位、缓冲区管理。
+24 个工具覆盖连接、串口收发、抓包历史与 CSV 导出、PWM/SPI/I2C 读写、引脚排列、按键模拟、USB 角色、目标复位、缓冲区管理。
 详见 [mcp/README.md](mcp/README.md)。
 
 ---
@@ -267,6 +287,7 @@ curl.exe -H "Expect:" -X POST --data-binary "@build\nexlink.bin" http://<IP>/api
 | GET | `/` | Web 状态页（内嵌完整控制面板） |
 | GET | `/api/status` | 状态大 JSON：WiFi/IP/波特率/收发计数/USB 角色/DAP 计数/OTA 槽位 |
 | GET | `/api/data` · `/api/mcp/data` | 读串口缓冲（后者是 MCP 独立缓冲，不抢 Web） |
+| GET | `/api/capture` | **带时间戳与方向的抓包历史**：`?since=&max=&fmt=text\|hex\|csv&want=chunks\|meta` |
 | POST | `/api/send` | 发串口数据（单请求上限 512 B） |
 | GET | `/api/baud?b=115200` | 切波特率 |
 | GET | `/api/pins` · POST `/api/pins` | 读/写引脚协议排列 |
@@ -280,7 +301,7 @@ curl.exe -H "Expect:" -X POST --data-binary "@build\nexlink.bin" http://<IP>/api
 | GET | `/api/dut/reset?ms=25&boot=1` | 复位目标板（可进下载模式） |
 | GET | `/api/usbtrace` · `/api/usbdesc` | USB 诊断 |
 | POST | `/api/ota` | 无线升级 |
-| GET | `/api/capacity` · POST `/api/clear` · POST `/api/cfg` | 缓冲区查询/清空/调整 |
+| GET | `/api/capacity` · POST `/api/clear` · POST `/api/cfg` | 缓冲区查询/清空/调整（`clear` 支持 `capture`） |
 | GET | `/api/ai/config` · POST `/api/ai/config` | AI/MCP 相关配置 |
 | GET | `/api/btn?b=1\|2\|3&a=press\|long` | 远程注入按键（建议间隔 ≥250 ms） |
 

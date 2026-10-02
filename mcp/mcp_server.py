@@ -295,12 +295,74 @@ def get_capacity() -> dict:
 
 
 @mcp.tool()
+def read_capture(since: int = 0, max_chunks: int = 64,
+                 fmt: str = "text", meta_only: bool = False) -> dict:
+    """
+    读取带时间戳与方向的抓包历史（比 read_serial 更适合协议分析）。
+
+    与 read_serial 的区别：read_serial 是"读走即消费"的裸字节流，没有时间信息；
+    本工具读取的是设备端有界的抓包环形缓冲，每条记录都带微秒级时间戳和方向
+    （rx=目标→主机, tx=主机→目标），并且可以反复读取同一段历史。
+
+    Args:
+        since: 起始序号（分页游标）。首次用 0，之后用上次返回的 next。
+        max_chunks: 本次最多返回几条（默认 64，设备端上限 64）。
+        fmt: "text"=可打印文本, "hex"=十六进制。
+        meta_only: True 时只返回摘要（不取数据），用于快速判断有没有新数据。
+
+    Returns:
+        dict: oldest/next/count/cap/bytes/dropped/returned 以及 chunks 列表。
+        dropped=True 表示缓冲已回绕，更早的数据被覆盖。
+        注意：chunks 里的 t 是设备开机以来的毫秒数（单调时钟）。
+    """
+    c = _require_client()
+    want = "meta" if meta_only else "chunks"
+    r = c.get(f"/api/capture?since={since}&max={max_chunks}"
+              f"&fmt={fmt}&want={want}")
+    r.raise_for_status()
+    return r.json()
+
+
+@mcp.tool()
+def export_capture_csv(since: int = 0, max_chunks: int = 96,
+                       hex_data: bool = True) -> str:
+    """
+    把抓包历史导出成 CSV（可直接存盘用 Excel / Python 分析）。
+
+    Args:
+        since: 起始序号（默认 0 = 从当前保留的最早一条开始）。
+        max_chunks: 最多导出几条（默认 96，设备端上限 96）。
+        hex_data: True=数据列为十六进制（默认），False=可打印 ASCII。
+
+    Returns:
+        CSV 文本，列：seq,uptime_ms,delta_ms,dir,len,data
+        delta_ms 是该条相对上一条的时间差——排协议时序靠它。
+    """
+    c = _require_client()
+    r = c.get(f"/api/capture?since={since}&max={max_chunks}"
+              f"&fmt=csv&hex={'1' if hex_data else '0'}")
+    r.raise_for_status()
+    return r.text
+
+
+@mcp.tool()
+def clear_capture() -> str:
+    """清空抓包历史（只清历史，不影响串口数据流与计数器）。"""
+    c = _require_client()
+    r = c.post("/api/clear?what=capture")
+    if r.status_code >= 400:
+        return f"清空失败 (HTTP {r.status_code}): {r.text}"
+    return "cleared capture"
+
+
+@mcp.tool()
 def clear_buffer(target: str = "all") -> str:
     """
     清空缓冲区，避免空间不足。
 
     Args:
-        target: "serial"=串口, "spi"=SPI历史, "i2c"=I2C历史, "rx"=RX历史, "all"=全部(默认)
+        target: "serial"=串口, "spi"=SPI历史, "i2c"=I2C历史, "rx"=RX历史,
+                "capture"=抓包历史, "all"=全部(默认)
     """
     c = _require_client()
     r = c.post(f"/api/clear?what={target}")
@@ -476,6 +538,7 @@ def device_status() -> str:
         spi = client.get("/api/spi").json()
         i2c = client.get("/api/i2c").json()
         pins = client.get("/api/pins").json()
+        cap = client.get("/api/capture?want=meta").json()
     except Exception as e:
         return f"设备连接失败: {e}"
 
@@ -488,6 +551,8 @@ def device_status() -> str:
         f"PWM: {pwm['freq']:.2f} Hz, {pwm['duty']:.1f}%  (pin={pwm['pin']})",
         f"SPI: {'运行中' if spi['running'] else '未启动'}, {spi['count']}笔事务",
         f"I2C: {'运行中' if i2c['running'] else '未启动'}, {i2c['count']}笔事务",
+        f"抓包: {cap.get('count', 0)}/{cap.get('cap', 0)} 条, seq {cap.get('oldest', 0)}..{cap.get('next', 0)}"
+        + ("（已回绕，早期数据被覆盖）" if cap.get("dropped") else ""),
         f"DAP TCP: :5555 (NexLink CMSIS-DAP 原始 TCP 通道，标准工具链请用 USB dap 模式)",
         "",
         "引脚分配:",

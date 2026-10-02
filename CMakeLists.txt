@@ -1,8 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
 
-set(EXTRA_COMPONENT_DIRS
-    ${CMAKE_CURRENT_LIST_DIR}/components
-)
+# NOTE: EXTRA_COMPONENT_DIRS is deliberately not set. The upstream project
+# pointed it at ./components for the ST7735S LCD panel driver; that display was
+# replaced by the I2C SSD1306 OLED, the component was removed, and a stale
+# reference to a non-existent directory makes CMake configure fail outright.
+# Add a components/ directory back (with real content) if a local component is
+# ever needed again.
 
 # --- CherryUSB (USB device stack behind the CMSIS-DAP probe) -----------------
 # CherryUSB's ESP32-S3 port needs one compile-time switch that has no Kconfig

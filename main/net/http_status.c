@@ -4,6 +4,8 @@
  * GET /            - HTML page: centered 160x80 LCD sim (crisp) + 3 buttons below, serial log
  * GET /api/status  - JSON: wifi, ip, baud, rx, tx, uptime, tcp, page, sel, usbdap
  * GET /api/data    - drain serial RX as text
+ * GET /api/capture - timestamped, direction-tagged capture history
+ *                    (?since=&max=&fmt=text|hex|csv&want=chunks|meta)
  * GET /api/btn?b=1&a=press - simulate button (b=1/2/3; a=press fires instantly,
  *                            a=long = the SW2 held gesture: cancel edit / home)
  * GET /api/usb_dap?toggle=1 - flip the USB CMSIS-DAP probe (on: starts now and
@@ -38,6 +40,7 @@
 #include "menu_ui.h"
 #include "oled_ssd1306.h"
 #include "pin_config.h"
+#include "capture.h"
 #include "swd_bridge.h"
 #include "pwm_mon.h"
 #include "spi_mon.h"
@@ -530,6 +533,164 @@ static esp_err_t btn_api_handler(httpd_req_t *req)
     }
     httpd_resp_set_type(req, "text/plain");
     return httpd_resp_send(req, "OK", 2);
+}
+
+/* ------------------------------------------------------------------ */
+/*  GET /api/capture - timestamped, direction-tagged capture history  */
+/*                                                                    */
+/*  The raw /api/data streams are byte pipes: no timing, no direction, */
+/*  and each poll consumes what it reads. This endpoint serves the     */
+/*  bounded history kept by capture.c instead, so a client can page    */
+/*  through it, or export the whole log as CSV.                        */
+/*                                                                    */
+/*    ?since=N   first chunk seq to return (client's paging cursor)    */
+/*    ?max=N     cap on chunks in this response (default 64)           */
+/*    ?fmt=      text (default) | hex | csv                            */
+/*    ?want=     chunks (default) | meta (summary only, no payload)    */
+/*                                                                    */
+/*  Clients page with the returned "next" value; if it lags the        */
+/*  current "next" the log overflowed and older chunks are gone.       */
+/* ------------------------------------------------------------------ */
+#define CAP_BATCH   64
+#define CAP_CSV_MAX 96
+#define CAP_HEX_MAX 48
+
+static esp_err_t capture_get_handler(httpd_req_t *req)
+{
+    static capture_chunk_t chunks[CAP_BATCH];
+    static char js[8192];
+    static char hexbuf[CAP_HEX_MAX * 2 + 4];
+    static char csvbuf[1024];
+
+    char query[96] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK)
+        query[0] = '\0';
+
+    char p_since[12] = {0}, p_max[12] = {0}, p_fmt[8] = {0}, p_want[12] = {0};
+    httpd_query_key_value(query, "since", p_since, sizeof(p_since));
+    httpd_query_key_value(query, "max",   p_max,   sizeof(p_max));
+    httpd_query_key_value(query, "fmt",   p_fmt,   sizeof(p_fmt));
+    httpd_query_key_value(query, "want",  p_want,  sizeof(p_want));
+
+    int v = atoi(p_max);
+    size_t req_max = (v > 0) ? (size_t)v : CAP_BATCH;
+    if (req_max > CAP_BATCH) req_max = CAP_BATCH;
+
+    bool want_csv = !strcasecmp(p_fmt, "csv");
+    bool want_hex = !strcasecmp(p_fmt, "hex");
+    bool meta_only = !strcasecmp(p_want, "meta");
+    if (want_csv && req_max > CAP_CSV_MAX) req_max = CAP_CSV_MAX;
+    if (want_hex && req_max > CAP_HEX_MAX) req_max = CAP_HEX_MAX;
+
+    uint32_t since = (uint32_t)strtoul(p_since, NULL, 10);
+    uint32_t next = since;
+    size_t n = meta_only ? 0 : capture_read(since, chunks, req_max, &next);
+
+    if (want_csv) {
+        httpd_resp_set_type(req, "text/csv; charset=utf-8");
+        const char *hdr =
+            "# NexLink capture log: seq,uptime_ms,delta_ms,dir,len,data\r\n"
+            "# dir: rx = target -> host, tx = host -> target\r\n"
+            "# data: hex bytes when hex=1, otherwise printable ASCII with . for non-printable\r\n"
+            "seq,uptime_ms,delta_ms,dir,len,data\r\n";
+        if (httpd_resp_send_chunk(req, hdr, strlen(hdr)) != ESP_OK)
+            return ESP_FAIL;
+
+        for (size_t i = 0; i < n; i++) {
+            const capture_chunk_t *c = &chunks[i];
+            int64_t prev_us = (i > 0) ? chunks[i - 1].timestamp_us
+                                      : (int64_t)c->timestamp_us;
+            int64_t delta_ms = (c->timestamp_us - prev_us) / 1000;
+            size_t p = 0;
+
+            p += (size_t)snprintf(csvbuf + p, sizeof(csvbuf) - p,
+                                  "%lu,%lld,%lld,%s,%u,",
+                                  (unsigned long)c->seq,
+                                  (long long)(c->timestamp_us / 1000),
+                                  (long long)delta_ms,
+                                  c->dir ? "tx" : "rx",
+                                  (unsigned)c->len);
+            for (size_t k = 0; k < c->len && p + 4 < sizeof(csvbuf); k++) {
+                uint8_t b = c->data[k];
+                if (want_hex) {
+                    p += (size_t)snprintf(csvbuf + p, sizeof(csvbuf) - p, "%02X", b);
+                } else {
+                    csvbuf[p++] = (b >= 0x20 && b < 0x7F) ? (char)b : '.';
+                }
+            }
+            csvbuf[p++] = '\r';
+            csvbuf[p++] = '\n';
+            csvbuf[p]   = '\0';
+
+            if (httpd_resp_send_chunk(req, csvbuf, p) != ESP_OK)
+                return ESP_FAIL;
+        }
+        return httpd_resp_send_chunk(req, NULL, 0);
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    size_t off = (size_t)snprintf(js, sizeof(js),
+        "{\"oldest\":%lu,\"next\":%lu,\"count\":%u,\"cap\":%u,\"bytes\":%u,"
+        "\"dropped\":%s,\"returned\":%u,\"fmt\":\"%s\",\"chunks\":[",
+        (unsigned long)capture_oldest_seq(),
+        (unsigned long)capture_next_seq(),
+        (unsigned)capture_count(),
+        (unsigned)capture_capacity(),
+        (unsigned)capture_bytes(),
+        capture_dropped() ? "true" : "false",
+        (unsigned)n,
+        want_hex ? "hex" : "text");
+
+    for (size_t i = 0; i < n; i++) {
+        const capture_chunk_t *c = &chunks[i];
+        if (off > sizeof(js) - 1024) break;   /* keep room for the tail */
+
+        if (want_hex) {
+            size_t hp = 0;
+            for (size_t k = 0; k < c->len && hp + 2 < sizeof(hexbuf); k++)
+                hp += (size_t)snprintf(hexbuf + hp, sizeof(hexbuf) - hp, "%02X", c->data[k]);
+            hexbuf[hp] = '\0';
+            off += (size_t)snprintf(js + off, sizeof(js) - off,
+                "%s{\"seq\":%lu,\"t\":%lld,\"dir\":\"%s\",\"len\":%u,\"trunc\":%s,\"hex\":\"%s\"}",
+                i ? "," : "", (unsigned long)c->seq,
+                (long long)(c->timestamp_us / 1000), c->dir ? "tx" : "rx",
+                (unsigned)c->len, c->truncated ? "true" : "false", hexbuf);
+        } else {
+            size_t k = 0;
+            off += (size_t)snprintf(js + off, sizeof(js) - off,
+                "%s{\"seq\":%lu,\"t\":%lld,\"dir\":\"%s\",\"len\":%u,\"trunc\":%s,\"text\":\"",
+                i ? "," : "", (unsigned long)c->seq,
+                (long long)(c->timestamp_us / 1000), c->dir ? "tx" : "rx",
+                (unsigned)c->len, c->truncated ? "true" : "false");
+            for (; k < c->len && off < sizeof(js) - 32; k++) {
+                uint8_t b = c->data[k];
+                const char *esc = NULL;
+                switch (b) {
+                case '\\': esc = "\\\\"; break;
+                case '"':  esc = "\\\""; break;
+                case '\n': esc = "\\n";  break;
+                case '\r': esc = "\\r";  break;
+                case '\t': esc = "\\t";  break;
+                default: break;
+                }
+                if (esc) {
+                    js[off++] = esc[0];
+                    js[off++] = esc[1];
+                } else if (b >= 0x20 && b < 0x7F) {
+                    js[off++] = (char)b;
+                } else {
+                    off += (size_t)snprintf(js + off, sizeof(js) - off, "\\u%04X", b);
+                }
+            }
+            if (k < c->len) { js[off++] = '.'; js[off++] = '.'; js[off++] = '.'; }
+            js[off++] = '"';
+            js[off++] = '}';
+            js[off]   = '\0';
+        }
+    }
+
+    off += (size_t)snprintf(js + off, sizeof(js) - off, "]}");
+    return httpd_resp_send(req, js, (ssize_t)off);
 }
 
 /* GET /api/usbdesc - hex dump of the USB descriptors as really sent.
@@ -1037,6 +1198,7 @@ static esp_err_t clear_api_handler(httpd_req_t *req)
     if (!strcmp(what, "spi")    || !strcmp(what, "all")) { spi_mon_clear();      known = true; }
     if (!strcmp(what, "i2c")    || !strcmp(what, "all")) { i2c_mon_clear();      known = true; }
     if (!strcmp(what, "rx")     || !strcmp(what, "all")) { menu_clear_rx();      known = true; }
+    if (!strcmp(what, "capture")|| !strcmp(what, "all")) { capture_reset_counters(); known = true; }
 
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req,
@@ -1539,7 +1701,7 @@ esp_err_t http_status_start(void)
 {
     httpd_handle_t server = NULL;
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 29;
+    cfg.max_uri_handlers = 31;
     cfg.stack_size = 8192;
     cfg.recv_wait_timeout = 10;
     cfg.send_wait_timeout = 10;
@@ -1554,6 +1716,7 @@ esp_err_t http_status_start(void)
     httpd_uri_t uri_status = { .uri="/api/status", .method=HTTP_GET, .handler=status_api_handler };
     httpd_uri_t uri_data = { .uri="/api/data", .method=HTTP_GET, .handler=data_api_handler };
     httpd_uri_t uri_mcp_data = { .uri="/api/mcp/data", .method=HTTP_GET, .handler=mcp_data_handler };
+    httpd_uri_t uri_capture = { .uri="/api/capture", .method=HTTP_GET, .handler=capture_get_handler };
     httpd_uri_t uri_btn = { .uri="/api/btn", .method=HTTP_GET, .handler=btn_api_handler };
     httpd_uri_t uri_usbdap = { .uri="/api/usb_dap", .method=HTTP_GET, .handler=usb_dap_api_handler };
     httpd_uri_t uri_usbtrace = { .uri="/api/usbtrace", .method=HTTP_GET, .handler=usbtrace_api_handler };
@@ -1585,6 +1748,7 @@ esp_err_t http_status_start(void)
     httpd_register_uri_handler(server, &uri_status);
     httpd_register_uri_handler(server, &uri_data);
     httpd_register_uri_handler(server, &uri_mcp_data);
+    httpd_register_uri_handler(server, &uri_capture);
     httpd_register_uri_handler(server, &uri_btn);
     httpd_register_uri_handler(server, &uri_usbdap);
     httpd_register_uri_handler(server, &uri_usbtrace);

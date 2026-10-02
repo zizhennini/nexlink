@@ -18,6 +18,7 @@
 #include "menu_ui.h"
 #include "wifi_manager.h"
 #include "serial_bridge.h"
+#include "capture.h"
 #include "swd_bridge.h"
 #include "pin_config.h"
 #include "pwm_mon.h"
@@ -110,6 +111,9 @@ void app_main(void)
 
     wifi_manager_init();
     pin_config_init();
+    /* Allocate the capture ring before the serial bridge starts producing
+     * data; capture_record() is a no-op until this runs. */
+    capture_init(CAPTURE_SLOTS_DEFAULT);
     serial_bridge_init(SERIAL_BAUD_DEFAULT);
     serial_bridge_set_rx_callback(on_serial_rx);
     swd_init();

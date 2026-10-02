@@ -6,6 +6,7 @@
 #include "driver/gpio.h"
 #include "pinout.h"
 #include "pin_config.h"
+#include "capture.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -104,6 +105,10 @@ static void uart_event_task(void *pv)
                 fanout_append(s_mcp_stream, tmp, (size_t)n);
                 fanout_append(s_usb_stream, tmp, (size_t)n);
                 inc_rx((uint32_t)n);
+
+                /* Timestamped, direction-tagged history for the capture log
+                 * (owned by capture.c; bounded and non-blocking). */
+                capture_record(CAPTURE_DIR_RX, tmp, (size_t)n);
 
                 if (s_rx_cb) {
                     s_rx_cb(tmp, (size_t)n);
@@ -280,6 +285,9 @@ size_t serial_bridge_write(const uint8_t *buf, size_t len)
     int n = uart_write_bytes(UART1_PORT_NUM, buf, len);
     if (n > 0) {
         inc_tx((uint32_t)n);
+        /* Log the TX side too, so the capture history is a full duplex trace
+         * (what we sent is often the only way to interpret the reply). */
+        capture_record(CAPTURE_DIR_TX, buf, (size_t)n);
     }
     return (n < 0) ? 0 : (size_t)n;
 }

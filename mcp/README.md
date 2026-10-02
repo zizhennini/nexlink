@@ -84,9 +84,10 @@ OpenCode：
 "把 PWM 设成 1kHz、50% 占空比"
 "把 USB 角色切到 dap"
 "复位目标板并强制进入下载模式"
+"把抓包历史导成 CSV，我要看 AT 指令之间的间隔"
 ```
 
-## 可用工具（21 个）
+## 可用工具（24 个）
 
 ### 连接与状态
 
@@ -104,6 +105,16 @@ OpenCode：
 | `read_serial(max_bytes)` | 读目标板串口数据（独立缓冲区，不抢 Web/MCP） |
 | `send_serial(data, newline)` | 发串口数据，自动按 480B 分块（固件单请求上限 512B） |
 | `set_baud(baud)` | 9600 / 115200 / 460800 / 921600 |
+
+### 抓包历史（带时间戳与方向）
+
+| 工具 | 功能 |
+|------|------|
+| `read_capture(since, max_chunks, fmt, meta_only)` | 读取带微秒时间戳与方向的历史，可反复读取同一段（分页游标 `since`） |
+| `export_capture_csv(since, max_chunks, hex_data)` | 导出 CSV：`seq,uptime_ms,delta_ms,dir,len,data`，`delta_ms` 用于排协议时序 |
+| `clear_capture()` | 只清抓包历史，不影响串口流与计数器 |
+
+> `read_serial` 是"读走即消费"的裸字节流；要做协议时序分析请用 `read_capture` / `export_capture_csv`。
 
 ### 协议监控与外设
 
@@ -132,7 +143,7 @@ OpenCode：
 
 | 工具 | 功能 |
 |------|------|
-| `clear_buffer(target)` | 清空 `serial` / `spi` / `i2c` / `rx` / `all` |
+| `clear_buffer(target)` | 清空 `serial` / `spi` / `i2c` / `rx` / `capture` / `all` |
 | `set_buffer_config(serial_buf, spi_hist, i2c_hist, rx_hist)` | 调整缓冲区大小与历史深度（设备端会钳位到安全范围） |
 
 ## 配置文件

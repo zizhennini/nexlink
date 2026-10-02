@@ -1,6 +1,7 @@
 idf_component_register(SRCS
                        "main.c"
                        "pin_config.c"
+                       "capture.c"
                        "pwm_mon.c"
                        "spi_mon.c"
                        "i2c_mon.c"
