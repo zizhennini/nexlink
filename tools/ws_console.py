@@ -28,7 +28,10 @@ ws_console.py — NexLink WebSocket 实时控制台
   {"cmd":"baud","v":921600}          切换波特率
   {"cmd":"clear","v":"capture"}      清空抓包历史（v 可为 serial/capture/all）
   {"cmd":"status"}                   请求一次状态快照
-  {"cmd":"capture","v":20}           让设备回推最近 N 条抓包（文本帧形式）
+  {"cmd":"capture","v":20}           让设备回推最近抓包（最多 32 条，从最早一条起）
+  {"cmd":"capture","v":20,"since":N} 从序号 N 开始，用于向前翻页；
+                                     device 回推的 {"t":"capture"} 头部里带 next，
+                                     把它作为下次的 since 即可继续跟进
 """
 
 import argparse
@@ -43,6 +46,10 @@ except ImportError:
     raise SystemExit(1)
 
 DIR_RX, DIR_TX = 0, 1
+
+# Shared between the reader (which learns the paging cursor from the device)
+# and the stdin sender (which uses it for the next "/capture").
+state = {"since": 0}
 
 
 def render(data: bytes, our_tx: bool = False) -> str:
@@ -86,6 +93,11 @@ async def reader(ws, raw: bool):
             except (ValueError, TypeError):
                 print(f"[ws] {msg}")
                 continue
+            # Follow the capture paging cursor: the device reports where the
+            # next batch starts, so a later bare "/capture" continues forward
+            # instead of re-reading the oldest retained chunks forever.
+            if isinstance(j, dict) and j.get("t") == "capture" and "next" in j:
+                state["since"] = j["next"]
             print(f"\033[33m[ws] {json.dumps(j, ensure_ascii=False)}\033[0m")
 
 
@@ -103,7 +115,14 @@ async def stdin_sender(ws):
             elif stripped.startswith("/capture"):
                 parts = stripped.split()
                 n = int(parts[1]) if len(parts) > 1 else 20
-                await ws.send(json.dumps({"cmd": "capture", "v": n}))
+                req = {"cmd": "capture", "v": n}
+                # A second argument pins the start explicitly; otherwise use the
+                # cursor the device handed back last time.
+                if len(parts) > 2:
+                    state["since"] = int(parts[2])
+                if state["since"]:
+                    req["since"] = state["since"]
+                await ws.send(json.dumps(req))
             elif stripped.startswith("/clear"):
                 parts = stripped.split()
                 await ws.send(json.dumps({"cmd": "clear",
@@ -115,7 +134,7 @@ async def stdin_sender(ws):
             elif stripped == "/quit":
                 break
             else:
-                print("本地命令: /status /capture [n] /clear [what] /baud <n> /quit")
+                print("本地命令: /status /capture [n] [since] /clear [what] /baud <n> /quit")
             continue
         # 普通输入按行发给目标
         await ws.send(json.dumps({"cmd": "send", "data": stripped + "\n"}))

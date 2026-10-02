@@ -120,9 +120,19 @@ curl "http://<IP>/api/capture?want=meta"
 | `{"cmd":"baud","v":921600}` | 切换波特率 |
 | `{"cmd":"clear","v":"capture"}` | 清空抓包历史（`v` 可为 `serial`/`capture`/`all`） |
 | `{"cmd":"status"}` | 请求一次状态快照 |
-| `{"cmd":"capture","v":20}` | 让设备回推最近 N 条抓包历史 |
+| `{"cmd":"capture","v":20}` | 回推抓包历史，最多 32 条（**默认从最早一条开始**） |
+| `{"cmd":"capture","v":20,"since":1234}` | 从序号 1234 开始，用于**向前翻页** |
 
-设备回推的文本帧是 JSON：`{"t":"status"|"ack"|"baud"|"capture", ...}`。
+- **文本帧 = 控制/日志**：设备回推的 JSON 形如 `{"t":"status"|"ack"|"baud"|"capture", ...}`；
+  `capture` 的每条记录另以文本帧逐行下发（`序号 +毫秒ms 方向 数据`）
+- **翻页**：`{"t":"capture"}` 头部里的 `next` 就是下次要回传的 `since`；
+  若它落后于 `{"t":"status"}` 里的 `capnext`，说明抓包环已回绕、中间的数据被覆盖了
+
+> ⚠️ 一个容易踩的点：**握手本身不会进入任何 handler**。
+> esp_http_server 自己在 `httpd_uri.c` 里应答 101 并返回，所以端点只注册一次
+> （`HTTP_GET`），客户端数量是在广播路径上重新统计的。这也意味着
+> `cfg.max_uri_handlers` 必须真的够用——不够时注册会返回
+> `ESP_ERR_HTTPD_HANDLERS_FULL`，表现为握手 404。
 
 **参考客户端** [tools/ws_console.py](tools/ws_console.py)：
 
@@ -135,7 +145,8 @@ python tools/ws_console.py --host <IP> --raw > log.bin # 只导出目标板数�
 控制台里的本地命令：`/status`、`/capture [n]`、`/clear [what]`、`/baud <n>`。
 
 > 设计上刻意做成**有界队列 + 丢帧**：浏览器卡住时丢的是网页帧，绝不会给 UART 数据通路施加反压。
-> 无客户端连接时完全不入队，空闲零开销。
+> 无客户端连接时完全不入队，空闲零开销。`send_wait_timeout` 也从默认的 5 s 收紧到 2 s，
+> 避免一个不读数据的客户端长时间占住唯一的广播任务。
 
 > 广播项内含一份 1 KB 载荷，`ws_broadcast_data()` 最坏会在调用者栈上多占约 1 KB。
 > 两个调用方的栈都够：UART 事件任务 4 KB、httpd 任务 8 KB（`cfg.stack_size = 8192`）。
