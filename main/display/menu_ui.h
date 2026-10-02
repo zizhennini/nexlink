@@ -7,33 +7,44 @@
 extern "C" {
 #endif
 
-/* Menu page IDs */
+/* Menu surface IDs.
+ *
+ * These identify what the panel is showing; they are also what /api/status
+ * reports as "page". The menu itself is a tree (see menu_ui.c): MENU_HOME is
+ * the root list, the MENU_LIST_* ids are list levels, and the remaining ids
+ * are read-only screens that a list entry can open. */
 typedef enum {
-    MENU_HOME = 0,    /* icon grid: RX / I2C / SPI / PWM / PIN / STA / CFG / AI */
-    MENU_STATUS,      /* status page: WiFi/IP/baud/counters */
-    MENU_RX_MON,      /* live RX data monitor */
-    MENU_SWD,         /* SWD pinout + IDCODE read */
-    MENU_CONFIG,      /* config page */
-    MENU_PWM,         /* PWM monitor: frequency + duty cycle */
-    MENU_SPI,         /* SPI slave monitor: captured bytes */
-    MENU_I2C,         /* I2C bus monitor: captured transactions */
-    MENU_AI,          /* AI assistant page */
+    MENU_HOME = 0,     /* root list: the four groups                       */
+    MENU_STATUS,       /* device state (uptime, baud, counters, tcp/http)  */
+    MENU_RX_MON,       /* live serial monitor                              */
+    MENU_SWD,          /* SWD/JTAG pins + last IDCODE read                 */
+    MENU_CONFIG,       /* kept for API compatibility (see README)          */
+    MENU_PWM,          /* PWM frequency + duty                             */
+    MENU_SPI,          /* SPI captured transactions                        */
+    MENU_I2C,          /* I2C captured transactions                        */
+    MENU_AI,           /* MCP readiness                                    */
+    MENU_CAPTURE,      /* timestamped capture log summary                  */
+    MENU_NET,          /* WiFi / IP / RSSI                                 */
+    MENU_FIRMWARE,     /* firmware slot / OTA state / reset reason         */
+    MENU_USB_STATE,    /* USB-C role and DAP counters                      */
+    MENU_LIST_MONITOR, /* the "监视" list level                            */
+    MENU_LIST_PROBE,   /* the "探针" list level                            */
+    MENU_LIST_SYSTEM,  /* the "系统" list level                            */
+    MENU_LIST_INFO,    /* the "信息" list level                            */
     MENU_COUNT
 } menu_page_t;
 
 /* Initialize the menu UI system. Call after oled_init(). */
 void menu_init(void);
 
-/* Navigation input from buttons.
- * Model: SW1=left key = up/previous, SW3=right key = down/next, SW2=middle =
- * context action. On MENU_HOME the side keys move the list cursor and SW2
- * enters; on a sub-page the side keys cycle pages (animated vertical slide)
- * and SW2-held (menu_on_sw2_long_press) returns home. On MENU_CONFIG the side
- * keys are the item cursor / value adjust and SW2 executes or confirms. */
-void menu_on_sw1_press(void);       /* up / previous */
-void menu_on_sw3_press(void);       /* down / next */
-void menu_on_sw2_press(void);       /* enter subpage / toggle mode / confirm */
-void menu_on_sw2_long_press(void);  /* SW2 held: universal escape -> HOME */
+/* Navigation input from buttons. ONE meaning everywhere:
+ *   SW1 = up      SW3 = down      SW2 = enter / back
+ *   SW2 held      = jump home from anywhere (including edit mode)
+ * On a read-only screen SW1/SW3 scroll the body when it has one. */
+void menu_on_sw1_press(void);       /* up / scroll up */
+void menu_on_sw3_press(void);       /* down / scroll down */
+void menu_on_sw2_press(void);       /* enter / back / confirm edit */
+void menu_on_sw2_long_press(void);  /* universal escape -> HOME */
 
 /* Feed serial RX data to the RX monitor page */
 void menu_push_rx_data(const uint8_t *data, uint32_t len);

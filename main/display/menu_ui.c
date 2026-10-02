@@ -1,55 +1,89 @@
 /*
- * menu_ui.c - 128x64 monochrome OLED menu UI (replaces the ST7735S build)
+ * menu_ui.c - OLED menu for NexLink (SSD1306 128x64, I2C).
  *
- * Layout: one 16px title row at the top, a separator, then three 16px content
- * rows. ASCII is 8px wide (16 columns), CJK 16px wide (8 columns).
+ * WHY THIS WAS REWRITTEN
+ * ----------------------
+ * The previous menu was an eight-page ring in which the home screen was BOTH a
+ * launcher and one of the ring stops. That made the same two buttons mean
+ * different things in different places: on home SW1/SW3 moved a cursor, on any
+ * other page they switched pages. The config screen had its own private
+ * list/edit state machine on top, and crammed eleven items into one page under
+ * abbreviations (SBuf, SHist, RHist, NetRst...).
  *
- * Navigation (panel: SW1=left, SW2=middle, SW3=right):
- *   HOME      SW1/SW3 move the list cursor, SW2 enters the page.
- *   subpage   SW1 = previous page, SW3 = next page (the eight pages form a
- *             ring; every swap is animated as a vertical slide), SW2 = the
- *             page's context action, SW2 held ~600 ms = back to HOME.
- *   CFG       SW1/SW3 are the item cursor / value editor here; SW2 executes
- *             an action item or confirms an edit. The title reads "Edit x"
- *             while editing and the editor auto-closes after 5 s idle.
- * SW2 long is the ONE universal escape: from every page and every mode it
- * returns HOME - it never gets swallowed by a sub-mode.
- * Clicks fire the instant the button is released - no double-click window,
- * so navigation never feels delayed. Position is never guesswork either:
- * every sub-page header carries its ring index "n/8".
+ * This version makes three concepts framework-level instead of per-page:
+ *
+ *   1. A GROUPED TREE. Home is a plain list of four groups; each group is a
+ *      list of entries. An entry is one of four kinds: another list, a
+ *      read-only screen, a one-shot action, or an adjustable value. Pages are
+ *      pushed on a small return stack, so "SW2 = enter / back" is the entire
+ *      input model and the tree can grow without new key logic.
+ *
+ *   2. ONE KEY MEANING EVERYWHERE (the point of the rewrite):
+ *        SW1 = up      SW3 = down      SW2 = enter / back
+ *        SW2 long      = jump home from anywhere, including edit mode
+ *      On a read-only screen SW1/SW3 scroll its body when it has one (only the
+ *      live RX monitor does) and are inert otherwise - they never silently
+ *      mean something else.
+ *
+ *   3. A FRAMEWORK-LEVEL EDIT MODE. An adjustable entry is edited by the same
+ *      code path wherever it lives: SW2 enters, SW1/SW3 change the value, SW2
+ *      confirms. The five-second idle exit is kept - an editor the user walked
+ *      away from must never swallow the escape gesture.
+ *
+ * PAINTING RULE (unchanged from the previous implementation)
+ * ----------------------------------------------------------
+ * Only the UI task ever touches the panel: button handlers mutate state and
+ * kick the UI task through s_kick; menu_render() snapshots and flushes. The
+ * panel sits on a shared I2C bus with the I2C monitor, so a second writer
+ * would corrupt both.
  */
 #include "menu_ui.h"
-#include "oled_ssd1306.h"
-#include "serial_bridge.h"
-#include "wifi_manager.h"
-#include "swd_bridge.h"
-#include "pinout.h"
-#include "pin_config.h"
-#include "pwm_mon.h"
-#include "spi_mon.h"
-#include "i2c_mon.h"
-#include "dap_usb.h"
-#include "usb_ttl.h"
-#include "esp_system.h"
 
-#include <string.h>
 #include <stdio.h>
-#include "esp_timer.h"
+#include <string.h>
+#include <strings.h>
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "esp_system.h"
+#include "esp_ota_ops.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "driver/uart.h"
 
+#include "oled_ssd1306.h"
+#include "pinout.h"
+#include "pin_config.h"
+#include "serial_bridge.h"
+#include "tcp_server.h"
+#include "usb_ttl.h"
+#include "wifi_manager.h"
+#include "swd_bridge.h"
+#include "pwm_mon.h"
+#include "spi_mon.h"
+#include "i2c_mon.h"
+#include "capture.h"
+#include "debug_pins.h"
+
 static const char *TAG = "menu";
 
-/* ---- Layout geometry ---- */
+/* ------------------------------------------------------------------ */
+/*  Layout                                                             */
+/* ------------------------------------------------------------------ */
+
 #define ROW_TITLE_Y   0
 #define ROW1_Y        16
 #define ROW2_Y        32
 #define ROW3_Y        48
 
-/* ---- RX line history ---- */
+/* Text lines available on a screen body (below the title bar). */
+#define BODY_ROWS     4
+
+/* ------------------------------------------------------------------ */
+/*  RX line history (fed by the serial bridge callback)                */
+/* ------------------------------------------------------------------ */
+
 #define RX_LINE_MAX   60
 #define RX_LINE_CAP   100
 static char  s_rx_lines[RX_LINE_CAP][RX_LINE_MAX + 1];
@@ -58,60 +92,305 @@ static volatile int s_rx_line_w = 0;
 static volatile int s_rx_line_n = 0;
 static volatile int s_rx_hist_max = 50;
 static int   s_rx_cur_col = 0;
-static int   s_rx_view_offset = 0;
 static bool  s_rx_hex_mode = false;
 
-/* Content width: 128px minus the 2px margin and the 16px "> " prefix. */
+/* Content width: 128px minus the 2px margin and the "> " prefix. */
 #define RX_CONTENT_PX  108
 
-/* The eight sub-pages form a vertical ring. The HOME view is a list of the
- * same ring; s_selected is the shared cursor, so the carousel and the list
- * always agree and "back to home" highlights the page you came from. */
-#define NAV_N 8
-static const menu_page_t s_nav_ring[NAV_N] = {
-    MENU_RX_MON, MENU_I2C, MENU_SPI, MENU_PWM,
-    MENU_SWD, MENU_STATUS, MENU_CONFIG, MENU_AI,
+/* ================================================================== */
+/*  Menu tree types                                                    */
+/* ================================================================== */
+
+typedef struct menu_list menu_list_t;
+
+typedef enum {
+    ENTRY_LIST,     /* push another list                              */
+    ENTRY_SCREEN,   /* open a read-only screen (page id)              */
+    ENTRY_ACTION,   /* run fn() once                                  */
+    ENTRY_VALUE,    /* edit: index into a value table, applied by fn() */
+} entry_kind_t;
+
+typedef struct {
+    const char  *label;
+    entry_kind_t kind;
+    union {
+        const menu_list_t *list;               /* ENTRY_LIST */
+        int                page;               /* ENTRY_SCREEN */
+        void             (*fn)(void);          /* ENTRY_ACTION */
+        struct {                               /* ENTRY_VALUE */
+            int8_t      *idx;
+            uint8_t      count;
+            const int   *table;
+            void       (*apply)(int value);
+            const char  *unit;
+        } val;
+    } u;
+} menu_entry_t;
+
+struct menu_list {
+    const char         *title;
+    const menu_entry_t *items;
+    uint8_t             count;
 };
-static const char *const s_nav_labels[NAV_N] = {
-    "RX Monitor", "I2C Bus", "SPI Bus", "PWM",
-    "SWD / DAP", "Status", "Config", "AI / MCP",
+
+/* ================================================================== */
+/*  Forward declarations                                               */
+/* ================================================================== */
+
+static const menu_list_t list_root;
+static const menu_list_t list_monitor;
+static const menu_list_t list_probe;
+static const menu_list_t list_system;
+static const menu_list_t list_info;
+
+static void act_clear_rx(void);
+static void act_clear_capture(void);
+static void act_reset_target(void);
+static void act_swd_idcode(void);
+static void act_usb_off(void);
+static void act_usb_dap(void);
+static void act_usb_ttl(void);
+static void act_wifi_ap(void);
+
+/* ================================================================== */
+/*  Configurable values                                                */
+/* ================================================================== */
+
+static const int val_bauds[]  = {9600, 115200, 460800, 921600};
+static const int val_bright[] = {10, 25, 50, 75, 100};
+static const int val_bufs[]   = {1024, 2048, 4096, 8192};
+static const int val_hist[]   = {10, 30, 50, 100};
+
+#define N_BAUD   4
+#define N_BRIGHT 5
+#define N_BUF    4
+#define N_HIST   4
+
+static int8_t s_baud_idx;
+static int8_t s_bright_idx;
+static int8_t s_buf_idx;
+static int8_t s_shist_idx;
+static int8_t s_ihist_idx;
+static int8_t s_rhist_idx;
+
+static void apply_baud(int v)   { serial_bridge_set_baud((uint32_t)v); }
+static void apply_bright(int v) { oled_set_contrast((uint8_t)((v * 255) / 100)); }
+static void apply_buf(int v)    { serial_bridge_set_bufsize((size_t)v); }
+static void apply_shist(int v)  { spi_mon_set_history_max(v); }
+static void apply_ihist(int v)  { i2c_mon_set_history_max(v); }
+static void apply_rhist(int v)  { menu_set_rx_hist_max(v); }
+
+/* ================================================================== */
+/*  List contents                                                      */
+/* ================================================================== */
+
+static const menu_entry_t items_monitor[] = {
+    { "RX Monitor",    ENTRY_SCREEN, { .page = MENU_RX_MON } },
+    { "I2C Bus",       ENTRY_SCREEN, { .page = MENU_I2C } },
+    { "SPI Bus",       ENTRY_SCREEN, { .page = MENU_SPI } },
+    { "PWM Measure",   ENTRY_SCREEN, { .page = MENU_PWM } },
+    { "Capture Log",   ENTRY_SCREEN, { .page = MENU_CAPTURE } },
+    { "Clear RX Hist", ENTRY_ACTION, { .fn = act_clear_rx } },
+    { "Clear Capture", ENTRY_ACTION, { .fn = act_clear_capture } },
+};
+static const menu_list_t list_monitor = {
+    "Monitor", items_monitor, sizeof(items_monitor) / sizeof(items_monitor[0])
 };
 
-static menu_page_t s_current_page = MENU_HOME;
-static int s_selected = 0;                 /* ring cursor, 0..NAV_N-1 */
+static const menu_entry_t items_probe[] = {
+    { "SWD / JTAG",   ENTRY_SCREEN, { .page = MENU_SWD } },
+    { "Read IDCODE",  ENTRY_ACTION, { .fn = act_swd_idcode } },
+    { "Reset Target", ENTRY_ACTION, { .fn = act_reset_target } },
+    { "USB: off",     ENTRY_ACTION, { .fn = act_usb_off } },
+    { "USB: probe",   ENTRY_ACTION, { .fn = act_usb_dap } },
+    { "USB: serial",  ENTRY_ACTION, { .fn = act_usb_ttl } },
+};
+static const menu_list_t list_probe = {
+    "Probe", items_probe, sizeof(items_probe) / sizeof(items_probe[0])
+};
 
-/* Page-swap animation. The button task only records the previous screen and
- * the intent here; the UI task performs every oled flush (the panel sits on a
- * shared I2C bus, so only ONE task may ever talk to it). */
-#define ANIM_FRAMES 5                      /* ~5 x 26ms = 130ms slide */
-static uint8_t           s_anim_old[OLED_FB_BYTES];
-static volatile bool     s_anim_pending;
-static volatile int      s_anim_dir;
-static SemaphoreHandle_t s_kick;           /* wakes the UI task instantly */
-static SemaphoreHandle_t s_nav_lock;       /* guards page state during swaps */
+static const menu_entry_t items_system[] = {
+    { "UART Baud",     ENTRY_VALUE, { .val = { &s_baud_idx,   N_BAUD,   val_bauds,  apply_baud,   "bps" } } },
+    { "Brightness",    ENTRY_VALUE, { .val = { &s_bright_idx, N_BRIGHT, val_bright, apply_bright, "%"   } } },
+    { "UART Buffer",   ENTRY_VALUE, { .val = { &s_buf_idx,    N_BUF,    val_bufs,   apply_buf,    "B"   } } },
+    { "SPI Depth",     ENTRY_VALUE, { .val = { &s_shist_idx,  N_HIST,   val_hist,   apply_shist,  "rec" } } },
+    { "I2C Depth",     ENTRY_VALUE, { .val = { &s_ihist_idx,  N_HIST,   val_hist,   apply_ihist,  "rec" } } },
+    { "RX Lines",      ENTRY_VALUE, { .val = { &s_rhist_idx,  N_HIST,   val_hist,   apply_rhist,  "ln"  } } },
+    { "WiFi: AP Mode", ENTRY_ACTION, { .fn = act_wifi_ap } },
+};
+static const menu_list_t list_system = {
+    "System", items_system, sizeof(items_system) / sizeof(items_system[0])
+};
 
-/* ---- SWD page state ---- */
-static uint32_t s_swd_idcode = 0;
-static bool     s_swd_idcode_valid = false;
-static int      s_swd_last_err = 0;
+static const menu_entry_t items_info[] = {
+    { "Device Status", ENTRY_SCREEN, { .page = MENU_STATUS } },
+    { "Network",       ENTRY_SCREEN, { .page = MENU_NET } },
+    { "Firmware",      ENTRY_SCREEN, { .page = MENU_FIRMWARE } },
+    { "USB Role",      ENTRY_SCREEN, { .page = MENU_USB_STATE } },
+    { "AI / MCP",      ENTRY_SCREEN, { .page = MENU_AI } },
+};
+static const menu_list_t list_info = {
+    "Info", items_info, sizeof(items_info) / sizeof(items_info[0])
+};
 
-void menu_init(void)
+static const menu_entry_t items_root[] = {
+    { "Monitor", ENTRY_LIST, { .list = &list_monitor } },
+    { "Probe",   ENTRY_LIST, { .list = &list_probe   } },
+    { "System",  ENTRY_LIST, { .list = &list_system  } },
+    { "Info",    ENTRY_LIST, { .list = &list_info    } },
+};
+static const menu_list_t list_root = {
+    "NexLink", items_root, sizeof(items_root) / sizeof(items_root[0])
+};
+
+/* ================================================================== */
+/*  Navigation state                                                   */
+/* ================================================================== */
+
+#define STACK_MAX 6
+
+typedef enum {
+    VIEW_LIST,     /* a list from the tree             */
+    VIEW_SCREEN,   /* a read-only screen               */
+    VIEW_EDIT,     /* editing s_edit                   */
+} view_t;
+
+static view_t             s_view = VIEW_LIST;
+static const menu_list_t *s_stack[STACK_MAX];
+static int                s_cursor[STACK_MAX];
+static int                s_depth = 1;          /* root is level 0 */
+static int                s_screen_page = MENU_HOME;
+static int                s_selected = 0;
+static int                s_scroll = 0;         /* RX monitor scroll-back */
+
+static const menu_entry_t *s_edit;
+static uint32_t            s_edit_ts;
+
+/* SWD result shown by the SWD/JTAG screen. */
+static uint32_t s_swd_idcode;
+static bool     s_swd_idcode_valid;
+static int      s_swd_last_err;
+
+/* Animation + cross-task wakeup.
+ *
+ * The slide animation of the old page-ring is gone: with a grouped list tree
+ * the useful motion is the cursor, and a full-screen slide on every list push
+ * made the (slow, shared-I2C) panel visibly lag. s_anim_* is kept only because
+ * oled_slide_from() is still available if a future transition wants it. */
+static uint8_t           s_anim_old[OLED_FB_BYTES] __attribute__((unused));
+static volatile bool     s_anim_pending __attribute__((unused));
+static volatile int      s_anim_dir     __attribute__((unused));
+static SemaphoreHandle_t s_kick;
+static SemaphoreHandle_t s_nav_lock;
+
+/* Defined in main.c; declared here rather than pulling in a private header. */
+extern const char *main_boot_reason(void);
+
+/* ================================================================== */
+/*  Small helpers                                                      */
+/* ================================================================== */
+
+static uint32_t now_s(void)
 {
-    /* Boot on the page list: the first thing you see tells you exactly where
-     * you are and what the three buttons do. */
-    s_current_page = MENU_HOME;
-    s_selected = 0;
-    s_rx_line_w = 0;
-    s_rx_line_n = 0;
-    s_rx_cur_col = 0;
-    s_rx_view_offset = 0;
-    s_rx_hex_mode = false;
-    s_anim_pending = false;
-    memset(s_rx_lines, 0, sizeof(s_rx_lines));
-    memset(s_rx_line_len, 0, sizeof(s_rx_line_len));
-    if (!s_kick) s_kick = xSemaphoreCreateBinary();
-    if (!s_nav_lock) s_nav_lock = xSemaphoreCreateMutex();
+    return (uint32_t)(esp_timer_get_time() / 1000000LL);
 }
+
+static void ui_kick(void)
+{
+    if (s_kick) xSemaphoreGive(s_kick);
+}
+
+#define EDIT_TIMEOUT_S 5
+
+/* True while an entry is being edited. Auto-exits after a period of no input
+ * (Marlin behaviour). Called from both tasks; the volatile 32-bit store cannot
+ * tear into a wrong value, so the worst case is one stale frame. */
+static bool edit_active(void)
+{
+    if (s_view != VIEW_EDIT) return false;
+    if (now_s() - s_edit_ts >= EDIT_TIMEOUT_S) {
+        s_view = VIEW_LIST;
+        return false;
+    }
+    return true;
+}
+
+/* ================================================================== */
+/*  Actions                                                            */
+/* ================================================================== */
+
+static void act_clear_rx(void)      { menu_clear_rx(); }
+static void act_clear_capture(void) { capture_reset_counters(); }
+
+static void act_reset_target(void)
+{
+    /* NRST is a plain GPIO, so this works even when the target is wedged and
+     * no SWD link can be established. */
+    swd_bus_lock();
+    swd_reset_target(true);
+    vTaskDelay(pdMS_TO_TICKS(25));
+    swd_reset_target(false);
+    swd_bus_unlock();
+    ESP_LOGI(TAG, "target reset pulse sent");
+}
+
+static void act_swd_idcode(void)
+{
+    /* The SWD pads are shared with the USB/TCP DAP transports, so hold the bus
+     * across the sequence. */
+    swd_bus_lock();
+    uint32_t id = 0;
+    esp_err_t e = swd_read_idcode(&id);
+    swd_bus_unlock();
+
+    if (e == ESP_OK) {
+        s_swd_idcode = id;
+        s_swd_idcode_valid = true;
+        s_swd_last_err = 0;
+        ESP_LOGI(TAG, "SWD IDCODE = 0x%08lX", (unsigned long)id);
+    } else {
+        s_swd_idcode_valid = false;
+        s_swd_last_err = (int)swd_get_last_ack();
+        ESP_LOGW(TAG, "SWD IDCODE read failed (ack=%d)", s_swd_last_err);
+    }
+    /* Show the result instead of only flashing it: switch to the SWD screen. */
+    s_screen_page = MENU_SWD;
+    s_scroll = 0;
+    s_view = VIEW_SCREEN;
+    ui_kick();
+}
+
+/* A USB role change reboots the board (a live USB stack is never torn down),
+ * so tell the user before restarting instead of appearing to hang. */
+static void usb_role_confirm(uint8_t mode, const char *label)
+{
+    pin_config_set_usb_mode(mode);
+    oled_clear();
+    oled_text(2, ROW1_Y, "USB role ->", false);
+    oled_text(2, ROW2_Y, label, false);
+    oled_text(2, ROW3_Y, "rebooting...", false);
+    oled_flush();
+    vTaskDelay(pdMS_TO_TICKS(1200));
+    esp_restart();
+}
+
+static void act_usb_off(void) { usb_role_confirm(USB_MODE_OFF, "off"); }
+static void act_usb_dap(void) { usb_role_confirm(USB_MODE_DAP, "probe"); }
+static void act_usb_ttl(void) { usb_role_confirm(USB_MODE_TTL, "serial"); }
+
+static void act_wifi_ap(void)
+{
+    wifi_manager_start_ap();
+    oled_clear();
+    oled_text(2, ROW1_Y, "WiFi AP mode", false);
+    oled_text(2, ROW2_Y, "started", false);
+    oled_flush();
+    vTaskDelay(pdMS_TO_TICKS(1200));
+}
+
+/* ================================================================== */
+/*  RX line history                                                    */
+/* ================================================================== */
 
 static void rx_new_line(void)
 {
@@ -122,373 +401,27 @@ static void rx_new_line(void)
     s_rx_cur_col = 0;
 }
 
-static bool s_spi_hex_mode = true;
-static bool s_i2c_hex_mode = true;
-
-/* ---- CFG settings list ---- */
-/* Items: 0=Baud 1=Bright 2=SBuf 3=SHist 4=IHist 5=RHist 6=NetRst 7=Clear */
-typedef enum { CFG_LIST, CFG_EDIT } cfg_state_t;
-static cfg_state_t s_cfg_state = CFG_LIST;
-static int  s_cfg_sel = 0;
-static int  s_cfg_baud_idx   = 1;
-static int  s_cfg_bright_idx = 4;
-static int  s_cfg_buf_idx    = 1;
-static int  s_cfg_shist_idx  = 2;
-static int  s_cfg_ihist_idx  = 2;
-static int  s_cfg_rhist_idx  = 2;
-static const uint32_t cfg_bauds[]  = {9600, 115200, 460800, 921600};
-static const int cfg_bright[]      = {10, 25, 50, 75, 100};
-static const int cfg_bufs[]        = {1024, 2048, 4096, 8192};
-static const int cfg_hist[]        = {10, 30, 50, 100};
-
-/* Edit-mode idle exit (Marlin-style timeout): the editor returns to the
- * list by itself after this many seconds without a key, so a mode the user
- * forgot about can never swallow the escape gesture. */
-#define CFG_EDIT_TIMEOUT_S 5
-static volatile uint32_t s_cfg_edit_ts;   /* uptime seconds of last edit activity */
-
-static uint32_t cfg_now_s(void)
+void menu_clear_rx(void)
 {
-    return (uint32_t)(esp_timer_get_time() / 1000000LL);
+    s_rx_line_w = 0;
+    s_rx_line_n = 0;
+    s_rx_cur_col = 0;
+    memset(s_rx_lines, 0, sizeof(s_rx_lines));
+    memset(s_rx_line_len, 0, sizeof(s_rx_line_len));
 }
 
-/* True when Config is in EDIT mode. Auto-closes an editor that has been
- * idle past the timeout (Marlin behaviour). Called from both tasks; the
- * volatile 32-bit stores here are single-copy, so a torn read cannot turn
- * into a wrong state - worst case one frame shows the stale mode. */
-static bool cfg_edit_active(void)
+void menu_set_rx_hist_max(int m)
 {
-    if (s_current_page != MENU_CONFIG || s_cfg_state != CFG_EDIT)
-        return false;
-    if (cfg_now_s() - s_cfg_edit_ts >= CFG_EDIT_TIMEOUT_S) {
-        s_cfg_state = CFG_LIST;
-        return false;
-    }
-    return true;
-}
-#define CFG_N_BAUD   ((int)(sizeof(cfg_bauds)/sizeof(cfg_bauds[0])))
-#define CFG_N_BRIGHT ((int)(sizeof(cfg_bright)/sizeof(cfg_bright[0])))
-#define CFG_N_BUF    ((int)(sizeof(cfg_bufs)/sizeof(cfg_bufs[0])))
-#define CFG_N_HIST   ((int)(sizeof(cfg_hist)/sizeof(cfg_hist[0])))
-#define CFG_N_ITEMS  11
-
-static const char *s_cfg_names[CFG_N_ITEMS] = {
-    "Baud", "Bright", "SBuf", "SHist", "IHist", "RHist", "NetRst", "Clear",
-    "WiFiAP", "I2Cmo", "USB mod",
-};
-
-static int cfg_baud_index(void)
-{
-    uint32_t b = 0;
-    uart_get_baudrate(UART1_PORT_NUM, &b);
-    for (int i = 0; i < CFG_N_BAUD; i++) if (cfg_bauds[i] == b) return i;
-    return 1;
+    if (m < 2) m = 2;
+    if (m > RX_LINE_CAP) m = RX_LINE_CAP;
+    s_rx_hist_max = m;
+    /* Clear together: otherwise s_rx_line_w could point outside the new window
+     * and the ring would read entries that are no longer part of it. */
+    menu_clear_rx();
 }
 
-static void cfg_adjust(int dir)
-{
-    s_cfg_edit_ts = cfg_now_s();          /* any tweak restarts the idle clock */
-    switch (s_cfg_sel) {
-    case 0:
-        s_cfg_baud_idx = (s_cfg_baud_idx + dir + CFG_N_BAUD) % CFG_N_BAUD;
-        serial_bridge_set_baud(cfg_bauds[s_cfg_baud_idx]);
-        break;
-    case 1:
-        s_cfg_bright_idx = (s_cfg_bright_idx + dir + CFG_N_BRIGHT) % CFG_N_BRIGHT;
-        oled_set_contrast((uint8_t)((cfg_bright[s_cfg_bright_idx] * 255) / 100));
-        break;
-    case 2:
-        s_cfg_buf_idx = (s_cfg_buf_idx + dir + CFG_N_BUF) % CFG_N_BUF;
-        serial_bridge_set_bufsize((size_t)cfg_bufs[s_cfg_buf_idx]);
-        break;
-    case 3:
-        s_cfg_shist_idx = (s_cfg_shist_idx + dir + CFG_N_HIST) % CFG_N_HIST;
-        spi_mon_set_history_max(cfg_hist[s_cfg_shist_idx]);
-        break;
-    case 4:
-        s_cfg_ihist_idx = (s_cfg_ihist_idx + dir + CFG_N_HIST) % CFG_N_HIST;
-        i2c_mon_set_history_max(cfg_hist[s_cfg_ihist_idx]);
-        break;
-    case 5:
-        s_cfg_rhist_idx = (s_cfg_rhist_idx + dir + CFG_N_HIST) % CFG_N_HIST;
-        /* Route through the public setter: it resets the ring head/current
-         * line together with the max, keeping s_rx_line_w < s_rx_hist_max. */
-        menu_set_rx_hist_max(cfg_hist[s_cfg_rhist_idx]);
-        break;
-    default:
-        break;   /* NetRst / Clear are actions, handled on confirm */
-    }
-}
-
-void menu_clear_rx(void);
-
-/* ------------------------------------------------------------------ */
-/* Page switching + slide animation plumbing                          */
-/* ------------------------------------------------------------------ */
-
-static void ui_kick(void)
-{
-    if (s_kick) xSemaphoreGive(s_kick);
-}
-
-/* Ring position of a page id, or -1 (MENU_HOME is not part of the ring). */
-static int ring_pos_of(menu_page_t p)
-{
-    for (int i = 0; i < NAV_N; i++) if (s_nav_ring[i] == p) return i;
-    return -1;
-}
-
-/* Change page. dir != 0 requests the vertical slide: the current (old) screen
- * is snapshotted here, and the UI task later renders the new page and plays
- * the frames. dir > 0: new page enters from the bottom (next); dir < 0: from
- * the top (previous / back). All panel I/O stays on the UI task. */
-static void set_page(menu_page_t p, int dir)
-{
-    if (p == s_current_page) dir = 0;   /* re-entering the same page: never
-                                         * play a self-slide */
-    if (s_nav_lock) xSemaphoreTake(s_nav_lock, portMAX_DELAY);
-    oled_fb_snapshot(s_anim_old);
-    s_current_page = p;
-    int pos = ring_pos_of(p);
-    if (pos >= 0) s_selected = pos;
-    if (p == MENU_CONFIG) s_cfg_state = CFG_LIST;
-    if (p == MENU_RX_MON) s_rx_view_offset = 0;
-    if (dir != 0) {
-        s_anim_dir = dir;
-        s_anim_pending = true;
-    }
-    if (s_nav_lock) xSemaphoreGive(s_nav_lock);
-    ui_kick();
-}
-
-/* Sleep until the next periodic redraw or until navigation wakes us. */
-void menu_ui_wait(int ms)
-{
-    if (ms < 1) ms = 1;
-    if (s_kick) xSemaphoreTake(s_kick, pdMS_TO_TICKS(ms));
-    else vTaskDelay(pdMS_TO_TICKS(ms));
-}
-
-/* ------------------------------------------------------------------ */
-/* CFG helpers                                                        */
-/* ------------------------------------------------------------------ */
-
-/* Items 6.. are one-shot actions: SW2 executes them straight from the list;
- * items 0..5 are value selectors (list -> edit -> adjust -> confirm). */
-static bool cfg_is_action(int i) { return i >= 6; }
-
-static void cfg_toggle_i2c_mode(void)
-{
-    int sda = pin_config_i2c_sda(), scl = pin_config_i2c_scl();
-    i2c_mon_stop();
-    if (i2c_mon_mode() == I2C_MON_SLAVE) {
-        if (sda >= 0 && scl >= 0) i2c_mon_start_passive(sda, scl);
-    } else {
-        if (sda >= 0 && scl >= 0) i2c_mon_start(sda, scl, 0);
-    }
-}
-
-/* USB-C role cycle off -> DAP -> TTL -> off (Config item 10). */
-static void usb_reboot_cb(void *arg) { esp_restart(); }
-
-static void cfg_cycle_usb_mode(void)
-{
-    static esp_timer_handle_t s_reboot_timer;
-    uint8_t conf = pin_config_usb_mode();
-    uint8_t next = (uint8_t)((conf + 1U) % 3U);
-    static const char *mode_s[3] = { "off", "dap", "ttl" };
-    bool phy_busy = dap_usb_is_started() || usb_ttl_is_started();
-
-    pin_config_set_usb_mode(next);
-
-    if (!phy_busy) {
-        /* Nothing owns the PHY yet: bring the new role up live. */
-        if (next == USB_MODE_DAP && dap_usb_start() != ESP_OK) {
-            ESP_LOGW(TAG, "USB DAP failed to start");
-        } else if (next == USB_MODE_TTL && usb_ttl_start() != ESP_OK) {
-            ESP_LOGW(TAG, "USB-TTL bridge failed to start");
-        }
-        ESP_LOGI(TAG, "USB mode -> %s (active now)", mode_s[next]);
-    } else if (next != conf) {
-        /* The running stack keeps the PHY; reboot to switch roles. Give the
-         * display one redraw with the new value first. */
-        if (!s_reboot_timer) {
-            const esp_timer_create_args_t a = {
-                .callback = usb_reboot_cb, .name = "usbmode"
-            };
-            esp_timer_create(&a, &s_reboot_timer);
-        }
-        if (s_reboot_timer) {
-            esp_timer_start_once(s_reboot_timer, 1500000);
-            ESP_LOGI(TAG, "USB mode -> %s: rebooting in 1.5 s to switch",
-                     mode_s[next]);
-        }
-    }
-}
-
-static void cfg_execute_action(int i)
-{
-    switch (i) {
-    case 6:  /* NetRst: forget saved WiFi credentials */
-        wifi_manager_clear_credentials();
-        break;
-    case 7:  /* Clear: drop every captured buffer */
-        serial_bridge_clear();
-        spi_mon_clear();
-        i2c_mon_clear();
-        menu_clear_rx();
-        break;
-    case 8:  /* WiFiAP: bring up the hotspot */
-        wifi_manager_start_ap();
-        break;
-    case 9:  /* I2Cmo: slave monitor <-> passive sniffer */
-        cfg_toggle_i2c_mode();
-        break;
-    case 10: /* USB mode: cycle the USB-C role off -> DAP -> TTL -> off.
-              * OFF -> active starts immediately. Any switch involving an
-              * already-claimed PHY reboots automatically after ~1.5 s -
-              * a live USB device stack is never torn down mid-transfer. */
-        cfg_cycle_usb_mode();
-        break;
-    default:
-        break;
-    }
-}
-
-/* ------------------------------------------------------------------ */
-/* Button handling                                                    */
-/* ------------------------------------------------------------------ */
-
-/* SW1 = left button = up / previous page. */
-void menu_on_sw1_press(void)
-{
-    switch (s_current_page) {
-    case MENU_HOME:
-        s_selected = (s_selected + NAV_N - 1) % NAV_N;
-        ui_kick();
-        break;
-    case MENU_CONFIG:
-        if (cfg_edit_active())
-            cfg_adjust(-1);
-        else
-            s_cfg_sel = (s_cfg_sel + CFG_N_ITEMS - 1) % CFG_N_ITEMS;
-        ui_kick();
-        break;
-    default: {
-        int pos = ring_pos_of(s_current_page);
-        if (pos < 0) pos = s_selected;
-        set_page(s_nav_ring[(pos + NAV_N - 1) % NAV_N], -1);
-        break;
-    }
-    }
-}
-
-/* SW3 = right button = down / next page. */
-void menu_on_sw3_press(void)
-{
-    switch (s_current_page) {
-    case MENU_HOME:
-        s_selected = (s_selected + 1) % NAV_N;
-        ui_kick();
-        break;
-    case MENU_CONFIG:
-        if (cfg_edit_active())
-            cfg_adjust(+1);
-        else
-            s_cfg_sel = (s_cfg_sel + 1) % CFG_N_ITEMS;
-        ui_kick();
-        break;
-    default: {
-        int pos = ring_pos_of(s_current_page);
-        if (pos < 0) pos = s_selected;
-        set_page(s_nav_ring[(pos + 1) % NAV_N], +1);
-        break;
-    }
-    }
-}
-
-void menu_on_sw2_press(void)
-{
-    switch (s_current_page) {
-    case MENU_HOME:
-        set_page(s_nav_ring[s_selected], +1);
-        break;
-
-    case MENU_RX_MON:
-        s_rx_hex_mode = !s_rx_hex_mode;
-        break;
-
-    case MENU_SPI:
-        s_spi_hex_mode = !s_spi_hex_mode;
-        break;
-
-    case MENU_I2C:
-        s_i2c_hex_mode = !s_i2c_hex_mode;
-        break;
-
-    case MENU_SWD:
-        /* Read the target's DP IDCODE on demand. The pads are shared with
-         * the USB/TCP DAP transports, so hold the bus for the sequence. */
-        swd_bus_lock();
-        s_swd_last_err = (int)swd_read_idcode(&s_swd_idcode);
-        swd_bus_unlock();
-        s_swd_idcode_valid = (s_swd_last_err == 0);
-        break;
-
-    case MENU_CONFIG:
-        if (cfg_edit_active()) {
-            s_cfg_state = CFG_LIST;                  /* done editing */
-        } else if (cfg_is_action(s_cfg_sel)) {
-            cfg_execute_action(s_cfg_sel);           /* one-shot action */
-        } else {
-            s_cfg_baud_idx = cfg_baud_index();
-            int sv = spi_mon_get_history_max();
-            for (int i = 0; i < CFG_N_HIST; i++) if (cfg_hist[i] == sv) s_cfg_shist_idx = i;
-            int iv = i2c_mon_get_history_max();
-            for (int i = 0; i < CFG_N_HIST; i++) if (cfg_hist[i] == iv) s_cfg_ihist_idx = i;
-            int rv = s_rx_hist_max;
-            for (int i = 0; i < CFG_N_HIST; i++) if (cfg_hist[i] == rv) s_cfg_rhist_idx = i;
-            s_cfg_state   = CFG_EDIT;
-            s_cfg_edit_ts = cfg_now_s();
-        }
-        break;
-
-    default:
-        break;
-    }
-    ui_kick();   /* context actions repaint immediately, not on the next tick */
-}
-
-/* SW2 long (held ~600 ms): ALWAYS returns to HOME - the one universal
- * escape. The previous behaviour ("first long cancels a config edit") was
- * the trapped-in-Config bug: the gesture got swallowed with only a subtle
- * visual change, and releasing too early fires a click that re-enters EDIT
- * mode, so the page seems impossible to leave. There is nothing to cancel:
- * adjustments apply live, and entering Config always starts from the list. */
-void menu_on_sw2_long_press(void)
-{
-    if (s_current_page != MENU_HOME) set_page(MENU_HOME, -1);
-}
-
-/* Simulated buttons (HTTP /api/btn). "long" and "hold" both mean the SW2 long
- * gesture now; SW1/SW3 ignore them. */
-void menu_simulate_button(int btn_id, const char *action)
-{
-    bool is_long = action && (strcmp(action, "long") == 0 ||
-                              strcmp(action, "hold") == 0);
-    if (btn_id == 2) {
-        if (is_long) menu_on_sw2_long_press();
-        else         menu_on_sw2_press();
-    } else if (btn_id == 1) {
-        menu_on_sw1_press();
-    } else if (btn_id == 3) {
-        menu_on_sw3_press();
-    }
-}
-
-/* ------------------------------------------------------------------ */
-/* RX capture                                                         */
-/* ------------------------------------------------------------------ */
+int menu_get_rx_hist_n(void)   { return s_rx_line_n; }
+int menu_get_rx_hist_max(void) { return s_rx_hist_max; }
 
 static int char_pixel_width(unsigned char c)
 {
@@ -509,457 +442,570 @@ static void push_serial_data(char prefix, const uint8_t *data, uint32_t len)
 
     for (uint32_t i = 0; i < len; i++) {
         char c = (char)data[i];
+        if (c == '\r') continue;
+        if (c == '\n') { rx_new_line(); continue; }
 
-        const char *esc = NULL;
-        int esc_w = 0;
-        switch (c) {
-        case '\n':   esc = "\\n"; esc_w = 2; break;
-        case '\r':   esc = "\\r"; esc_w = 2; break;
-        case '\t':   esc = "\\t"; esc_w = 2; break;
-        case '\0':   esc = "\\0"; esc_w = 2; break;
-        case '\x1b': esc = "\\e"; esc_w = 2; break;
-        default:
-            if ((unsigned char)c < 0x20) {
-                static char hexbuf[5];
-                snprintf(hexbuf, sizeof(hexbuf), "\\x%02X", (unsigned char)c);
-                esc = hexbuf;
-                esc_w = 4;
-            }
-            break;
-        }
-
-        if (esc) {
-            for (int e = 0; e < esc_w; e++) {
-                if (display_w + OLED_CHAR_W > RX_CONTENT_PX) {
-                    rx_new_line();
-                    s_rx_lines[s_rx_line_w][0] = ' ';
-                    s_rx_lines[s_rx_line_w][1] = ' ';
-                    s_rx_cur_col = 2;
-                    s_rx_line_len[s_rx_line_w] = 2;
-                    s_rx_lines[s_rx_line_w][s_rx_cur_col] = '\0';
-                    display_w = 0;
-                }
-                if (s_rx_line_len[s_rx_line_w] < RX_LINE_MAX) {
-                    s_rx_lines[s_rx_line_w][s_rx_cur_col++] = esc[e];
-                    s_rx_line_len[s_rx_line_w]++;
-                    s_rx_lines[s_rx_line_w][s_rx_cur_col] = '\0';
-                    display_w += OLED_CHAR_W;
-                }
-            }
+        char hexbuf[5];
+        const char *ins;
+        char one[2] = { c, '\0' };
+        if (s_rx_hex_mode) {
+            snprintf(hexbuf, sizeof(hexbuf), "%02X ", (uint8_t)c);
+            ins = hexbuf;
         } else {
-            int cw = char_pixel_width((unsigned char)c);
-            if (display_w + cw > RX_CONTENT_PX) {
-                rx_new_line();
-                s_rx_lines[s_rx_line_w][0] = ' ';
-                s_rx_lines[s_rx_line_w][1] = ' ';
-                s_rx_cur_col = 2;
-                s_rx_line_len[s_rx_line_w] = 2;
-                s_rx_lines[s_rx_line_w][s_rx_cur_col] = '\0';
-                display_w = 0;
-            }
-            if (s_rx_line_len[s_rx_line_w] < RX_LINE_MAX) {
-                s_rx_lines[s_rx_line_w][s_rx_cur_col++] = c;
-                s_rx_line_len[s_rx_line_w]++;
-                s_rx_lines[s_rx_line_w][s_rx_cur_col] = '\0';
-                display_w += cw;
-            }
+            ins = one;
         }
+
+        int w = 0;
+        for (const char *p = ins; *p; p++) w += char_pixel_width((unsigned char)*p);
+        if (w == 0) continue;
+
+        if (display_w + w > RX_CONTENT_PX) {
+            rx_new_line();
+            s_rx_lines[s_rx_line_w][0] = prefix;
+            s_rx_lines[s_rx_line_w][1] = ' ';
+            s_rx_cur_col = 2;
+            s_rx_line_len[s_rx_line_w] = 2;
+            display_w = 0;
+        }
+        int cap = RX_LINE_MAX - s_rx_cur_col;
+        int used = 0;
+        for (const char *p = ins; *p && used < cap; p++, used++)
+            s_rx_lines[s_rx_line_w][s_rx_cur_col++] = *p;
+        s_rx_lines[s_rx_line_w][s_rx_cur_col] = '\0';
+        s_rx_line_len[s_rx_line_w] = s_rx_cur_col;
+        display_w += w;
     }
+    ui_kick();
 }
 
 void menu_push_rx_data(const uint8_t *data, uint32_t len) { push_serial_data('>', data, len); }
 void menu_push_tx_data(const uint8_t *data, uint32_t len) { push_serial_data('<', data, len); }
 
-/* ------------------------------------------------------------------ */
-/* Shared drawing helpers                                             */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  Text helpers                                                       */
+/* ================================================================== */
 
-/* Draw the standard page header and clear the content area below it. The
- * ring position "n/8" is stamped right-aligned so you always know which of
- * the eight pages you are on and how far the list slid. */
 static void page_header(const char *title)
 {
-    oled_clear();
     oled_text(0, ROW_TITLE_Y, title, false);
-    int pos = ring_pos_of(s_current_page);
-    if (pos >= 0) {
-        char idx[16];
-        snprintf(idx, sizeof idx, "%d/%d", pos + 1, NAV_N);
-        oled_text(OLED_WIDTH - (int)strlen(idx) * OLED_CHAR_W, ROW_TITLE_Y, idx, false);
-    }
-    oled_hline(0, ROW1_Y - 1, OLED_WIDTH, true);
+    oled_hline(0, ROW_TITLE_Y + 14, OLED_WIDTH, true);
 }
 
-/* Left-justified label plus a right-aligned value on the same text row. */
 static void row_kv(int y, const char *key, const char *value)
 {
-    oled_text(0, y, key, false);
-    if (value && *value) {
-        int w = oled_utf8_width(value, OLED_WIDTH);
-        int x = OLED_WIDTH - w;
-        if (x < 0) x = 0;
-        oled_utf8(x, y, value, false);
-    }
+    char line[32];
+    snprintf(line, sizeof(line), "%-7s%.15s", key, value);
+    oled_text(0, y, line, false);
 }
 
-/* Append `n` bytes as hex to `out`, never overflowing `cap` (keeps the NUL). */
-static void append_hex(char *out, size_t cap, const uint8_t *d, int n)
+/* Footer hint, so the key model is discoverable without the manual. The
+ * buffer is deliberately wider than the 16 columns the panel shows: the
+ * project builds with -Werror=format-truncation, so every caller must be able
+ * to prove its formatted text fits. */
+static void footer(const char *hint)
 {
-    size_t used = strlen(out);
-    for (int i = 0; i < n && used + 2 < cap; i++) {
-        used += (size_t)snprintf(&out[used], cap - used, "%02X", d[i]);
-    }
+    char line[24];
+    snprintf(line, sizeof(line), "%-16.16s", hint);
+    oled_text(0, 55, line, false);
 }
 
-/* Append `n` bytes as printable ASCII ('.' for unprintable) to `out`. */
-static void append_ascii(char *out, size_t cap, const uint8_t *d, int n)
+/* ================================================================== */
+/*  Read-only screens                                                  */
+/* ================================================================== */
+
+static void screen_status(void)
 {
-    size_t used = strlen(out);
-    for (int i = 0; i < n && used + 1 < cap; i++) {
-        unsigned char c = d[i];
-        out[used++] = (c >= 0x20 && c < 0x7F) ? (char)c : '.';
-    }
-    out[used] = '\0';
-}
+    char v[24];
+    page_header("Device Status");
 
-/* ------------------------------------------------------------------ */
-/* Pages                                                              */
-/* ------------------------------------------------------------------ */
+    uint32_t s = (uint32_t)(esp_timer_get_time() / 1000000);
+    snprintf(v, sizeof(v), "%luh%02lum", (unsigned long)(s / 3600),
+             (unsigned long)((s / 60) % 60));
+    row_kv(ROW1_Y, "Up", v);
 
-/* HOME is a vertically scrolling page list. Three rows are visible; the
- * window follows the cursor so the highlighted page is always centre-ish, and
- * the highlight is a full-width inverted bar that is impossible to lose. */
-static void render_home(void)
-{
-    oled_clear();
-    oled_text(0, ROW_TITLE_Y, "Menu", false);
-    char b[16];
-    snprintf(b, sizeof b, "%d/%d", s_selected + 1, NAV_N);
-    oled_text(OLED_WIDTH - (int)strlen(b) * OLED_CHAR_W, ROW_TITLE_Y, b, false);
-    oled_hline(0, ROW1_Y - 1, OLED_WIDTH, true);
-
-    const int rows = 3;
-    int top = s_selected - 1;          /* keep the cursor away from the edges */
-    if (top < 0) top = 0;
-    if (top > NAV_N - rows) top = NAV_N - rows;
-
-    for (int r = 0; r < rows; r++) {
-        int i = top + r;
-        if (i >= NAV_N) break;
-        int y  = ROW1_Y + r * OLED_CHAR_H;
-        bool sel = (i == s_selected);
-        if (sel) oled_fill_rect(0, y, OLED_WIDTH, OLED_CHAR_H, true);
-        oled_text(0, y, s_nav_labels[i], sel);
-        if (sel) oled_text(OLED_WIDTH - OLED_CHAR_W, y, ">", true);
-    }
-}
-
-static void render_status(void)
-{
-    page_header("Status");
-
-    wifi_state_t st = wifi_manager_get_state();
-    const char *ws = (st == WIFI_STATE_AP_MODE)       ? "AP"  :
-                     (st == WIFI_STATE_CONNECTED_STA) ? "STA" :
-                     (st == WIFI_STATE_CONNECTING)    ? "..." : "OFF";
-    char ip[20] = "-";
-    wifi_manager_get_ip_str(ip, sizeof(ip));
-    row_kv(ROW1_Y, ws, ip);
-
-    uint32_t baud = 0;
-    uart_get_baudrate(UART1_PORT_NUM, &baud);
-    char buf[24];
-    snprintf(buf, sizeof(buf), "%lu", (unsigned long)baud);
-    row_kv(ROW2_Y, "Baud", buf);
-
-    snprintf(buf, sizeof(buf), "R%lu T%lu",
-             (unsigned long)serial_bridge_get_rx_count(),
+    snprintf(v, sizeof(v), "%lu/%lu", (unsigned long)serial_bridge_get_rx_count(),
              (unsigned long)serial_bridge_get_tx_count());
-    row_kv(ROW3_Y, "UART1", buf);
+    row_kv(ROW2_Y, "RX/TX", v);
+
+    snprintf(v, sizeof(v), "%lu", (unsigned long)serial_bridge_get_baud());
+    row_kv(ROW3_Y, "Baud", v);
+
+    snprintf(v, sizeof(v), "tcp%u cap%u", (unsigned)tcp_server_client_count(),
+             (unsigned)capture_count());
+    oled_text(0, 48, v, false);
+    footer("SW2=back");
 }
 
-static void render_rx_mon(void)
+static void screen_net(void)
 {
-    char title[24];
-    /* Keep it short: the "n/8" badge owns the right end of the title row. */
-    snprintf(title, sizeof(title), "RX %s", s_rx_hex_mode ? "HEX" : "TXT");
-    page_header(title);
+    char ip[16] = "-", v[24], ssid[24] = "-";
+    int rssi = 0;
+    wifi_state_t st = wifi_manager_get_state();
+    wifi_manager_get_ip_str(ip, sizeof(ip));
 
-    if (s_rx_line_n <= 0) {
-        oled_utf8(0, ROW1_Y, "等待数据...", false);
+    page_header("Network");
+    row_kv(ROW1_Y, "State", st == WIFI_STATE_CONNECTED_STA ? "STA" :
+                           st == WIFI_STATE_AP_MODE        ? "AP"  : "down");
+    row_kv(ROW2_Y, "IP", ip);
+
+    if (st == WIFI_STATE_CONNECTED_STA) {
+        wifi_ap_record_t ar;
+        if (esp_wifi_sta_get_ap_info(&ar) == ESP_OK) {
+            ar.ssid[sizeof(ar.ssid) - 1] = '\0';
+            /* Precision bound: an SSID can be 32 bytes, the panel only shows
+             * 15 columns after the key field, and -Werror=format-truncation
+             * must be able to prove the result fits. */
+            snprintf(ssid, sizeof(ssid), "%.15s", (char *)ar.ssid);
+            rssi = ar.rssi;
+        }
+    }
+    row_kv(ROW3_Y, "SSID", ssid);
+    snprintf(v, sizeof(v), "rssi %d dBm", rssi);
+    oled_text(0, 48, v, false);
+    footer("SW2=back");
+}
+
+static void screen_firmware(void)
+{
+    page_header("Firmware");
+
+    const esp_partition_t *run = esp_ota_get_running_partition();
+    row_kv(ROW1_Y, "Slot", run ? run->label : "?");
+
+    const char *s = "ok";
+    esp_ota_img_states_t st;
+    if (run && esp_ota_get_state_partition(run, &st) == ESP_OK &&
+        st == ESP_OTA_IMG_PENDING_VERIFY) s = "pending";
+    row_kv(ROW2_Y, "State", s);
+    row_kv(ROW3_Y, "Reset", main_boot_reason());
+    oled_text(0, 48, "OTA: POST /api/ota", false);
+    footer("SW2=back");
+}
+
+static void screen_usb(void)
+{
+    extern bool     dap_usb_is_started(void);
+    extern uint32_t dap_usb_configured_count(void);
+    extern uint32_t dap_usb_get_rx_packets(void);
+    extern uint32_t dap_usb_get_tx_packets(void);
+
+    static const char *mode_s[3] = { "off", "probe", "serial" };
+    char v[24], dbg[24];
+    page_header("USB Role");
+
+    uint8_t m = pin_config_usb_mode();
+    row_kv(ROW1_Y, "Role", mode_s[m <= USB_MODE_TTL ? m : 0]);
+    snprintf(v, sizeof(v), "%u", (unsigned)dap_usb_configured_count());
+    row_kv(ROW2_Y, "DAPcfg", v);
+    snprintf(v, sizeof(v), "%lu/%lu", (unsigned long)dap_usb_get_rx_packets(),
+             (unsigned long)dap_usb_get_tx_packets());
+    row_kv(ROW3_Y, "DAP io", v);
+
+    debug_pins_report(dbg, sizeof(dbg));
+    snprintf(v, sizeof(v), "dbgIO %.15s", debug_pins_claimed() ? dbg : "none");
+    oled_text(0, 48, v, false);
+    footer("SW2=back");
+}
+
+static void screen_swd(void)
+{
+    char v[24];
+    page_header("SWD / JTAG");
+
+    row_kv(ROW1_Y, "SWD", "12/13/14");
+    row_kv(ROW2_Y, "JTAG", "48/38/39");
+    row_kv(ROW3_Y, "SWO", "IO40");
+
+    if (s_swd_idcode_valid)
+        snprintf(v, sizeof(v), "ID 0x%08lX", (unsigned long)s_swd_idcode);
+    else
+        snprintf(v, sizeof(v), "ID fail ack%d", s_swd_last_err);
+    oled_text(0, 48, v, false);
+    footer("SW2=back");
+}
+
+static void screen_pwm(void)
+{
+    char v[24];
+    float f = 0.0f, d = 0.0f;
+    page_header("PWM");
+
+    pwm_mon_get(&f, &d);
+    snprintf(v, sizeof(v), "%.1f Hz", (double)f);
+    row_kv(ROW1_Y, "InFreq", v);
+    snprintf(v, sizeof(v), "%.1f %%", (double)d);
+    row_kv(ROW2_Y, "InDuty", v);
+
+    if (pwm_out_running()) {
+        pwm_out_get(&f, &d);
+        snprintf(v, sizeof(v), "%.0fHz %.0f%%", (double)f, (double)d);
+    } else {
+        snprintf(v, sizeof(v), "stopped");
+    }
+    row_kv(ROW3_Y, "Out", v);
+    footer("SW2=back");
+}
+
+static void screen_spi(void)
+{
+    char v[24];
+    page_header("SPI Bus");
+
+    snprintf(v, sizeof(v), "%lu", (unsigned long)spi_mon_get_count());
+    row_kv(ROW1_Y, "Count", v);
+    snprintf(v, sizeof(v), "%lu", (unsigned long)spi_mon_get_timeouts());
+    row_kv(ROW2_Y, "Timeouts", v);
+    row_kv(ROW3_Y, "State", spi_mon_running() ? "run" : "stop");
+
+    /* Newest captured transaction, hex, truncated to the panel width. */
+    static spi_txn_t h[1];
+    if (spi_mon_get_history(h, 1) == 1 && h[0].len > 0) {
+        char line[19];
+        int p = 0;
+        for (int i = 0; i < h[0].len && p < 16; i++)
+            p += snprintf(line + p, sizeof(line) - p, "%02X", h[0].mosi[i]);
+        oled_text(0, 48, "M:", false);
+        oled_text(16, 48, line, false);
+    } else {
+        oled_text(0, 48, "no transactions", false);
+    }
+    footer("SW2=back");
+}
+
+static void screen_i2c(void)
+{
+    char v[24], line[24];
+    page_header("I2C Bus");
+
+    snprintf(v, sizeof(v), "%lu", (unsigned long)i2c_mon_get_count());
+    row_kv(ROW1_Y, "Count", v);
+    snprintf(v, sizeof(v), "%lu", (unsigned long)i2c_mon_get_isr_count());
+    row_kv(ROW2_Y, "ISR", v);
+    row_kv(ROW3_Y, "Mode", i2c_mon_mode() == I2C_MON_SLAVE ? "slave" : "passive");
+
+    i2c_txn_t h[1];
+    int n = i2c_mon_get_history(h, 1);
+    if (n == 1) {
+        snprintf(line, sizeof(line), "a%02X %s len%d", h[0].addr,
+                 h[0].read ? "R" : "W", h[0].len);
+        oled_text(0, 48, line, false);
+    } else {
+        oled_text(0, 48, "no transactions", false);
+    }
+    footer("SW2=back");
+}
+
+static void screen_capture(void)
+{
+    char v[24];
+    page_header("Capture Log");
+
+    snprintf(v, sizeof(v), "%u/%u", (unsigned)capture_count(),
+             (unsigned)capture_capacity());
+    row_kv(ROW1_Y, "Chunks", v);
+    snprintf(v, sizeof(v), "%lu", (unsigned long)capture_oldest_seq());
+    row_kv(ROW2_Y, "Oldest", v);
+    snprintf(v, sizeof(v), "%lu", (unsigned long)capture_next_seq());
+    row_kv(ROW3_Y, "Next", v);
+    snprintf(v, sizeof(v), "%s %u B", capture_dropped() ? "WRAPPED" : "ok",
+             (unsigned)capture_bytes());
+    oled_text(0, 48, v, false);
+    footer("SW2=back");
+}
+
+static void screen_ai(void)
+{
+    page_header("AI / MCP");
+    wifi_state_t st = wifi_manager_get_state();
+    bool net = (st == WIFI_STATE_CONNECTED_STA || st == WIFI_STATE_AP_MODE);
+    row_kv(ROW1_Y, "MCP", net ? "ready" : "no net");
+
+    char ip[16] = "-";
+    wifi_manager_get_ip_str(ip, sizeof(ip));
+    row_kv(ROW2_Y, "IP", ip);
+    row_kv(ROW3_Y, "Tools", "24");
+    oled_text(0, 48, "mcp/mcp_server.py", false);
+    footer("SW2=back");
+}
+
+/* Live serial monitor: the only screen with a scrollable body. */
+static void screen_rx(void)
+{
+    page_header("RX Monitor");
+
+    int n = s_rx_line_n;
+    if (n > s_rx_hist_max) n = s_rx_hist_max;
+
+    /* s_scroll counts lines back from the newest (0 = newest visible). */
+    int start = n - BODY_ROWS - s_scroll;
+    if (start < 0) start = 0;
+
+    for (int row = 0; row < BODY_ROWS; row++) {
+        int idx = start + row;
+        if (idx >= n - s_scroll) break;
+        int ring = ((s_rx_line_w - (n - 1) + idx) % s_rx_hist_max + s_rx_hist_max) % s_rx_hist_max;
+        oled_text(0, ROW1_Y + row * 16, s_rx_lines[ring], false);
+    }
+
+    char hint[24];
+    if (s_scroll) snprintf(hint, sizeof(hint), "SCROLL %d  SW2=bk", s_scroll);
+    else          snprintf(hint, sizeof(hint), "%s  SW2=back",
+                          s_rx_hex_mode ? "HEX" : "TXT");
+    footer(hint);
+}
+
+/* ================================================================== */
+/*  Rendering                                                          */
+/* ================================================================== */
+
+static void render_list(void)
+{
+    const menu_list_t *l = s_stack[s_depth - 1];
+    int cur = s_cursor[s_depth - 1];
+
+    page_header(l->title);
+
+    /* Keep the cursor visible. */
+    int first = 0;
+    if (cur >= BODY_ROWS) first = cur - BODY_ROWS + 1;
+
+    for (int row = 0; row < BODY_ROWS; row++) {
+        int idx = first + row;
+        if (idx >= l->count) break;
+        char line[20];
+        snprintf(line, sizeof(line), "%c%-15.15s", idx == cur ? '>' : ' ',
+                 l->items[idx].label);
+        oled_text(0, ROW1_Y + row * 16, line, false);
+    }
+
+    char hint[24];
+    snprintf(hint, sizeof(hint), "%d/%d  SW2=ok", cur + 1, l->count);
+    footer(hint);
+}
+
+static void render_edit(void)
+{
+    const menu_entry_t *e = s_edit;
+    char v[24];
+
+    page_header(e->label);
+
+    int idx = *e->u.val.idx;
+    snprintf(v, sizeof(v), "%d %s", e->u.val.table[idx], e->u.val.unit);
+    /* Inverted so "this is what SW1/SW3 changes" is unmistakable. */
+    oled_fill_rect(0, ROW2_Y, OLED_WIDTH, 16, false);
+    oled_invert_rect(0, ROW2_Y, OLED_WIDTH, 16);
+    oled_text(0, ROW2_Y, v, false);
+
+    oled_text(0, ROW3_Y, "+/-  SW1 / SW3", false);
+    footer("SW2=confirm");
+}
+
+static void render_screen(void)
+{
+    switch (s_screen_page) {
+    case MENU_RX_MON:    screen_rx();       break;
+    case MENU_STATUS:    screen_status();   break;
+    case MENU_NET:       screen_net();      break;
+    case MENU_FIRMWARE:  screen_firmware(); break;
+    case MENU_USB_STATE: screen_usb();      break;
+    case MENU_SWD:       screen_swd();      break;
+    case MENU_PWM:       screen_pwm();      break;
+    case MENU_SPI:       screen_spi();      break;
+    case MENU_I2C:       screen_i2c();      break;
+    case MENU_CAPTURE:   screen_capture();  break;
+    case MENU_AI:        screen_ai();       break;
+    default:
+        page_header("?");
+        footer("SW2=back");
+        break;
+    }
+}
+
+/* ================================================================== */
+/*  Input                                                              */
+/* ================================================================== */
+
+static void nav_vertical(int dir)
+{
+    /* Editing: change the value. */
+    if (edit_active()) {
+        const menu_entry_t *e = s_edit;
+        s_edit_ts = now_s();
+        int n = e->u.val.count;
+        int idx = ((int)*e->u.val.idx + dir + n) % n;
+        *e->u.val.idx = (int8_t)idx;
+        if (e->u.val.apply) e->u.val.apply(e->u.val.table[idx]);
+        ui_kick();
         return;
     }
 
-    int y = ROW1_Y;
-    for (int row = 0; row < 3; row++) {
-        int back = s_rx_view_offset + row;
-        if (back >= s_rx_line_n) break;
-        int idx = (s_rx_line_w - back + s_rx_hist_max * 2) % s_rx_hist_max;
-        const char *line = s_rx_lines[idx];
-        if (!line || !*line) continue;
-
-        if (s_rx_hex_mode) {
-            /* Render every byte as two hex digits, prefixed with the marker. */
-            char hex[RX_LINE_MAX * 3 + 2];
-            int n = 0;
-            if (line[0] == '>' || line[0] == '<') hex[n++] = line[0];
-            for (int i = 2; line[i] && n < (int)sizeof(hex) - 3; i++) {
-                n += snprintf(&hex[n], sizeof(hex) - n, "%02X", (unsigned char)line[i]);
-            }
-            hex[n] = '\0';
-            oled_utf8(0, y, hex, false);
-        } else {
-            oled_utf8(0, y, line, false);
+    /* On a screen only the RX monitor has anything to scroll. */
+    if (s_view == VIEW_SCREEN) {
+        if (s_screen_page == MENU_RX_MON) {
+            int max = s_rx_line_n - BODY_ROWS;
+            if (max < 0) max = 0;
+            s_scroll += dir;
+            if (s_scroll > max) s_scroll = max;
+            if (s_scroll < 0) s_scroll = 0;
+            ui_kick();
         }
-        y += OLED_CHAR_H;
-    }
-}
-
-static void render_swd(void)
-{
-    page_header("SWD / DAP");
-    char buf[24];
-
-    /* Fixed dedicated SWD pins. */
-    snprintf(buf, sizeof(buf), "C%d D%d R%d", PIN_SWD_SWCLK, PIN_SWD_SWDIO, PIN_SWD_NRST);
-    row_kv(ROW1_Y, "Pin", buf);
-
-    if (s_swd_idcode_valid) {
-        snprintf(buf, sizeof(buf), "%08lX", (unsigned long)s_swd_idcode);
-        row_kv(ROW2_Y, "ID", buf);
-    } else {
-        row_kv(ROW2_Y, "ID", s_swd_last_err ? "ERR" : "-");
+        return;
     }
 
-    row_kv(ROW3_Y, "SW2", "read ID");
+    /* In a list: move the cursor. */
+    const menu_list_t *l = s_stack[s_depth - 1];
+    int cur = ((s_cursor[s_depth - 1] + dir) % l->count + l->count) % l->count;
+    s_cursor[s_depth - 1] = cur;
+    s_selected = cur;
+    ui_kick();
 }
 
-static void render_config(void)
+void menu_on_sw1_press(void) { nav_vertical(-1); }
+void menu_on_sw3_press(void) { nav_vertical(+1); }
+
+void menu_on_sw2_press(void)
 {
-    char title[24];
-    /* The mode must be OBVIOUS: the editor is a different screen, not the
-     * same list with a 1-px arrow - that is how "I cannot exit Config"
-     * happened. Title doubles as the mode label. */
-    if (s_cfg_state == CFG_EDIT)
-        snprintf(title, sizeof(title), "Edit %s", s_cfg_names[s_cfg_sel]);
-    else
-        snprintf(title, sizeof(title), "Config");
-    page_header(title);
+    /* 1. Editing: confirm and leave the editor. */
+    if (edit_active()) {
+        s_view = VIEW_LIST;
+        s_edit = NULL;
+        ui_kick();
+        return;
+    }
 
-    char val[16];
-    /* Show a sliding window of three items around the selection. */
-    int first = s_cfg_sel - 1;
-    if (first < 0) first = 0;
-    if (first > CFG_N_ITEMS - 3) first = CFG_N_ITEMS - 3;
+    /* 2. A screen: back to the list it was opened from. */
+    if (s_view == VIEW_SCREEN) {
+        s_view = VIEW_LIST;
+        s_scroll = 0;
+        ui_kick();
+        return;
+    }
 
-    for (int row = 0; row < 3; row++) {
-        int i = first + row;
-        if (i >= CFG_N_ITEMS) break;
-        int y = ROW1_Y + row * OLED_CHAR_H;
+    /* 3. A list: activate the highlighted entry. */
+    const menu_list_t *l = s_stack[s_depth - 1];
+    const menu_entry_t *e = &l->items[s_cursor[s_depth - 1]];
 
-        switch (i) {
-        case 0: snprintf(val, sizeof(val), "%lu", (unsigned long)cfg_bauds[s_cfg_baud_idx]); break;
-        case 1: snprintf(val, sizeof(val), "%d%%", cfg_bright[s_cfg_bright_idx]); break;
-        case 2: snprintf(val, sizeof(val), "%d", cfg_bufs[s_cfg_buf_idx]); break;
-        case 3: snprintf(val, sizeof(val), "%d", cfg_hist[s_cfg_shist_idx]); break;
-        case 4: snprintf(val, sizeof(val), "%d", cfg_hist[s_cfg_ihist_idx]); break;
-        case 5: snprintf(val, sizeof(val), "%d", cfg_hist[s_cfg_rhist_idx]); break;
-        case 6: snprintf(val, sizeof(val), "do"); break;   /* NetRst action */
-        case 7: snprintf(val, sizeof(val), "do"); break;   /* Clear action  */
-        case 8: {                                          /* WiFiAP state  */
-            wifi_state_t w = wifi_manager_get_state();
-            snprintf(val, sizeof(val), "%s",
-                     w == WIFI_STATE_AP_MODE ? "AP" :
-                     w == WIFI_STATE_CONNECTED_STA ? "STA" : "off");
-            break; }
-        case 9: snprintf(val, sizeof(val), "%s",
-                         i2c_mon_mode() == I2C_MON_SLAVE ? "slave" : "passive"); break;
-        case 10: {                                   /* USB-C role        */
-            static const char *umode_s[3] = { "off", "dap", "ttl" };
-            uint8_t conf = pin_config_usb_mode();
-            bool pending = (dap_usb_is_started() || usb_ttl_is_started())
-                           && ((conf == USB_MODE_DAP) != dap_usb_is_started()
-                               || (conf == USB_MODE_TTL) != usb_ttl_is_started());
-            snprintf(val, sizeof(val), "%s%s", umode_s[conf], pending ? "*" : "");
-            break; }
-        default: val[0] = '\0'; break;
+    switch (e->kind) {
+    case ENTRY_LIST:
+        if (s_depth < STACK_MAX) {
+            s_stack[s_depth]  = e->u.list;
+            s_cursor[s_depth] = 0;
+            s_depth++;
+            s_selected = 0;
         }
+        break;
 
-        bool sel = (i == s_cfg_sel);
-        if (sel) oled_fill_rect(0, y, OLED_WIDTH, OLED_CHAR_H, true);
+    case ENTRY_SCREEN:
+        s_screen_page = e->u.page;
+        s_scroll = 0;
+        s_view = VIEW_SCREEN;
+        break;
 
-        oled_text(0, y, s_cfg_names[i], sel);
-        if (val[0]) {
-            int w = (int)strlen(val) * OLED_CHAR_W;
-            oled_text(OLED_WIDTH - w, y, val, sel);
-        }
-        if (sel && s_cfg_state == CFG_EDIT) {
-            oled_text(OLED_WIDTH - 8 * (int)strlen(val) - 8, y, "<", sel);
-        }
+    case ENTRY_ACTION:
+        if (e->u.fn) e->u.fn();
+        break;
+
+    case ENTRY_VALUE:
+        s_edit = e;
+        s_edit_ts = now_s();
+        s_view = VIEW_EDIT;
+        break;
+    }
+
+    if (s_view == VIEW_LIST) s_selected = s_cursor[s_depth - 1];
+    ui_kick();
+}
+
+void menu_on_sw2_long_press(void)
+{
+    /* Universal escape: drop the whole stack, cancel any edit or scroll. This
+     * is the one gesture that can never be ambiguous. */
+    s_depth = 1;
+    s_cursor[0] = 0;
+    s_selected = 0;
+    s_view = VIEW_LIST;
+    s_scroll = 0;
+    s_edit = NULL;
+    ui_kick();
+}
+
+void menu_simulate_button(int btn_id, const char *action)
+{
+    bool is_long = action && (strcmp(action, "long") == 0 ||
+                              strcmp(action, "hold") == 0);
+    if (btn_id == 2) {
+        if (is_long) menu_on_sw2_long_press();
+        else         menu_on_sw2_press();
+    } else if (btn_id == 1) {
+        menu_on_sw1_press();
+    } else if (btn_id == 3) {
+        menu_on_sw3_press();
     }
 }
 
-static void render_pwm(void)
+/* ================================================================== */
+/*  Task plumbing                                                      */
+/* ================================================================== */
+
+void menu_init(void)
 {
-    page_header("PWM");
+    s_depth = 1;
+    s_stack[0] = &list_root;
+    s_cursor[0] = 0;
+    s_selected = 0;
+    s_view = VIEW_LIST;
+    s_scroll = 0;
+    s_screen_page = MENU_HOME;
+    s_edit = NULL;
+    s_anim_pending = false;
 
-    float freq = 0.0f, duty = 0.0f;
-    pwm_mon_get(&freq, &duty);
+    /* Seed the editors from live state, so the first visit shows the truth
+     * instead of a hard-coded default. */
+    uint32_t b = 0;
+    uart_get_baudrate(UART1_PORT_NUM, &b);
+    s_baud_idx = 1;
+    for (int i = 0; i < N_BAUD; i++)
+        if ((uint32_t)val_bauds[i] == b) s_baud_idx = (int8_t)i;
+    s_bright_idx = 4;
+    s_buf_idx    = 1;
+    s_shist_idx  = 2;
+    s_ihist_idx  = 2;
+    s_rhist_idx  = 2;
 
-    char buf[24];
-    snprintf(buf, sizeof(buf), "%.2f Hz", (double)freq);
-    row_kv(ROW1_Y, "Freq", buf);
-    snprintf(buf, sizeof(buf), "%.1f %%", (double)duty);
-    row_kv(ROW2_Y, "Duty", buf);
+    menu_clear_rx();
+    if (!s_kick)     s_kick     = xSemaphoreCreateBinary();
+    if (!s_nav_lock) s_nav_lock = xSemaphoreCreateMutex();
 
-    /* Two periods of the measured square wave across the bottom row. */
-    const int y_hi = ROW3_Y + 3, y_lo = ROW3_Y + 14;
-    int hi_px = (int)((duty / 100.0f) * 64.0f);
-    if (hi_px < 0) hi_px = 0;
-    if (hi_px > 64) hi_px = 64;
-
-    for (int rep = 0; rep < 2; rep++) {
-        int x0 = rep * 64;
-        if (hi_px > 0)  oled_hline(x0, y_hi, hi_px, true);
-        if (hi_px < 64) oled_hline(x0 + hi_px, y_lo, 64 - hi_px, true);
-        /* Edge transitions. */
-        if (hi_px > 0 && hi_px < 64) {
-            oled_vline(x0 + hi_px, y_hi, y_lo - y_hi + 1, true);
-        }
-        oled_vline(x0, y_hi, y_lo - y_hi + 1, true);
-    }
+    ESP_LOGI(TAG, "menu ready: 4 groups, SW1/SW3=up/down, SW2=enter/back");
 }
 
-static void render_spi(void)
+void menu_ui_wait(int ms)
 {
-    char title[24];
-    snprintf(title, sizeof(title), "SPI %s %s",
-             s_spi_hex_mode ? "HEX" : "TXT",
-             spi_mon_running() ? "run" : "stop");
-    page_header(title);
-
-    char buf[40];
-    snprintf(buf, sizeof(buf), "%lu txn",
-             (unsigned long)spi_mon_get_count());
-    row_kv(ROW1_Y, "Count", buf);
-
-    /* Walk the two most recent transactions (newest first). */
-    uint32_t count = spi_mon_get_count();
-    spi_txn_t t;
-    int shown = 0;
-    for (uint32_t seq = count; seq > 0 && shown < 2; seq--) {
-        if (spi_mon_read_history(seq - 1, &t) != 0) break;
-        snprintf(buf, sizeof(buf), "%lu:", (unsigned long)t.seq);
-        if (s_spi_hex_mode) append_hex(buf, sizeof(buf), t.mosi, t.len > 6 ? 6 : t.len);
-        else                append_ascii(buf, sizeof(buf), t.mosi, t.len > 10 ? 10 : t.len);
-        oled_utf8(0, shown == 0 ? ROW2_Y : ROW3_Y, buf, false);
-        shown++;
-    }
-    if (shown == 0) oled_text(0, ROW2_Y, "no data", false);
-}
-
-static void render_i2c(void)
-{
-    char title[28];
-    snprintf(title, sizeof(title), "I2C %s %s",
-             s_i2c_hex_mode ? "HEX" : "TXT",
-             i2c_mon_running() ? "run" : "stop");
-    page_header(title);
-
-    char buf[40];
-    snprintf(buf, sizeof(buf), "%lu txn",
-             (unsigned long)i2c_mon_get_count());
-    row_kv(ROW1_Y, "Count", buf);
-
-    uint32_t count = i2c_mon_get_count();
-    i2c_txn_t t;
-    int shown = 0;
-    for (uint32_t seq = count; seq > 0 && shown < 2; seq--) {
-        if (i2c_mon_read_history(seq - 1, &t) != 0) break;
-        snprintf(buf, sizeof(buf), "%02X%c ", (unsigned)t.addr, t.read ? 'R' : 'W');
-        if (s_i2c_hex_mode) append_hex(buf, sizeof(buf), t.data, t.len > 6 ? 6 : t.len);
-        else                append_ascii(buf, sizeof(buf), t.data, t.len > 10 ? 10 : t.len);
-        oled_utf8(0, shown == 0 ? ROW2_Y : ROW3_Y, buf, false);
-        shown++;
-    }
-    if (shown == 0) {
-        /* No traffic yet: show the monitor mode instead so the page is useful. */
-        oled_text(0, ROW2_Y, i2c_mon_mode() == I2C_MON_SLAVE ? "slave" : "passive", false);
-        oled_text(0, ROW3_Y, "CFG item I2Cmo", false);
-    }
-}
-
-static void render_ai(void)
-{
-    page_header("AI / MCP");
-
-    wifi_state_t st = wifi_manager_get_state();
-    oled_text(0, ROW1_Y, (st == WIFI_STATE_CONNECTED_STA ||
-                          st == WIFI_STATE_AP_MODE) ? "MCP ready" : "MCP no net", false);
-
-    char ip[20] = "-";
-    wifi_manager_get_ip_str(ip, sizeof(ip));
-    row_kv(ROW2_Y, "IP", ip);
-
-    oled_text(0, ROW3_Y,
-              dap_usb_is_started() ? "DAP usb+tcp:5555" : "DAP tcp:5555",
-              false);
+    if (!s_kick) { vTaskDelay(pdMS_TO_TICKS(ms)); return; }
+    xSemaphoreTake(s_kick, pdMS_TO_TICKS(ms));
 }
 
 void menu_render(void)
 {
-    if (!oled_is_ready()) { s_anim_pending = false; return; }
-
-    /* Consume any pending page-swap intent set by the button task. The new
-     * page is rendered once, then replayed as a vertical slide from the old
-     * screen. All panel writes happen here, on the single UI task.
-     * The lock serializes against set_page(): a press that arrives while the
-     * slide plays snapshots cleanly afterwards instead of grabbing a
-     * half-drawn frame or getting dropped. */
-    if (s_nav_lock) xSemaphoreTake(s_nav_lock, portMAX_DELAY);
-
-    /* Even with nobody touching the keys the idle editor must close. */
-    cfg_edit_active();
-
-    bool anim = s_anim_pending;
-    int  dir  = s_anim_dir;
-    s_anim_pending = false;
-
-    switch (s_current_page) {
-    case MENU_HOME:   render_home();   break;
-    case MENU_STATUS: render_status(); break;
-    case MENU_RX_MON: render_rx_mon(); break;
-    case MENU_SWD:    render_swd();    break;
-    case MENU_CONFIG: render_config(); break;
-    case MENU_PWM:    render_pwm();    break;
-    case MENU_SPI:    render_spi();    break;
-    case MENU_I2C:    render_i2c();    break;
-    case MENU_AI:     render_ai();     break;
-    default:          render_home();   break;
+    /* Only the UI task reaches here, so the panel has a single writer. */
+    switch (s_view) {
+    case VIEW_EDIT:   render_edit();   break;
+    case VIEW_SCREEN: render_screen(); break;
+    case VIEW_LIST:
+    default:          render_list();   break;
     }
-
-    if (anim) oled_slide_from(s_anim_old, dir, ANIM_FRAMES);
-    else      oled_flush();
-
-    if (s_nav_lock) xSemaphoreGive(s_nav_lock);
+    oled_flush();
 }
 
-int menu_get_current_page(void) { return (int)s_current_page; }
+int menu_get_current_page(void)
+{
+    if (s_view == VIEW_SCREEN) return s_screen_page;
+    if (s_depth <= 1) return MENU_HOME;
+    if (s_stack[1] == &list_probe)  return MENU_LIST_PROBE;
+    if (s_stack[1] == &list_system) return MENU_LIST_SYSTEM;
+    if (s_stack[1] == &list_info)   return MENU_LIST_INFO;
+    return MENU_LIST_MONITOR;
+}
+
 int menu_get_selected(void) { return s_selected; }
-
-int menu_get_rx_hist_n(void)   { return s_rx_line_n; }
-int menu_get_rx_hist_max(void) { return s_rx_hist_max; }
-void menu_set_rx_hist_max(int m)
-{
-    if (m < 2) m = 2;
-    if (m > RX_LINE_CAP) m = RX_LINE_CAP;
-    s_rx_hist_max = m;
-    s_rx_line_n = 0;
-    s_rx_line_w = 0;
-}
-void menu_clear_rx(void)
-{
-    s_rx_line_n = 0;
-    s_rx_line_w = 0;
-    s_rx_cur_col = 0;
-}
