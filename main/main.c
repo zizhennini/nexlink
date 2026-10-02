@@ -117,10 +117,10 @@ void app_main(void)
     }
     menu_init();
 
-    /* Power-on animation. It runs before the network comes up, so it shows a
-     * progress sweep rather than an address; the splash is skipped entirely
-     * when there is no panel so a headless boot is not delayed. */
-    if (oled_is_ready()) boot_splash_run(NULL, 900);
+    /* Power-on animation: the wordmark only. It runs before the network comes
+     * up, so there is no address to show yet. Skipped when there is no panel so
+     * a headless boot is not delayed. */
+    if (oled_is_ready()) boot_splash_run(900);
 
     wifi_manager_init();
     pin_config_init();

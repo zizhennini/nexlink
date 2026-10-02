@@ -2,10 +2,13 @@
 /*
  * boot_splash.h - power-on animation for the OLED.
  *
- * Kept in its own small module rather than inside menu_ui.c because it is not
- * part of the menu: it runs once, before the menu exists, and must never be
- * able to disturb menu state. It can also be skipped entirely (headless boot,
- * or when a fast start matters more than the animation).
+ * Deliberately minimal: the wordmark "NexLink" slides in and settles, then
+ * holds for a moment before the menu takes the panel over. No progress bar, no
+ * status lines - those compete with the menu for attention and, on a 64px-tall
+ * panel, for room.
+ *
+ * Kept out of menu_ui.c because it runs once, before the menu exists, and must
+ * not be able to disturb menu state.
  */
 #include <stdbool.h>
 
@@ -13,17 +16,14 @@
 extern "C" {
 #endif
 
-/* Play the splash. Safe to call when the panel is absent: every drawing call
- * is a framebuffer write and oled_flush() fails harmlessly.
+/* Play the splash. Safe when the panel is absent: every call is a framebuffer
+ * write and oled_flush() fails harmlessly.
  *
- *   ip      optional address shown under the wordmark; NULL or empty shows a
- *           generic line instead. Passed in rather than looked up here so the
- *           splash has no dependency on the WiFi manager.
- *   ms      approximate duration of the progress sweep
+ *   ms   approximate duration of the motion, before the hold
  */
-void boot_splash_run(const char *ip, int ms);
+void boot_splash_run(int ms);
 
-/* Draw the static "ready" screen (wordmark + address) without the sweep. */
+/* Draw the settled wordmark (plus the address if one is known) without motion. */
 void boot_splash_ready(const char *ip);
 
 #ifdef __cplusplus

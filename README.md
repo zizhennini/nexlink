@@ -70,18 +70,34 @@ SPI/I2C/PWM 协议分析仪、以及让 AI 直接操控硬件的 MCP 接口。
 
 ### 🖥️ OLED 菜单（SSD1306 128×64，I2C）
 
-8 个页面的功能环，竖屏滑动切换动画，支持 180° 翻转安装：
-
 ```
-RX Monitor · I2C Bus · SPI Bus · PWM · SWD/DAP · Status · Config · AI/MCP
+NexLink
+├── Monitor   RX Monitor · I2C Bus · SPI Bus · PWM · Capture Log · Clear RX/Capture
+├── Probe     SWD/JTAG · Read IDCODE · Reset Target · USB: off/probe/serial
+├── System    UART Baud · Brightness · UART Buffer · SPI/I2C Depth · RX Lines · WiFi AP
+└── Info      Device Status · Network · Firmware · USB Role · AI/MCP
 ```
 
-- **主页**：SW3 移动光标，SW2 进入所选功能
-- **子页**：SW3 / SW1 下一页 / 上一页
-- **SW2 长按**：全局返回主页（万能逃生键，编辑态也生效）
-- **Config 页**：波特率 / 亮度 / 缓冲区大小 / 历史深度 / USB 角色 / 清空
-- **编辑态 5 秒无操作自动退出**，避免忘记按键手势
+**按键只有一个含义，没有例外：**
+
+| 按键 | 作用 |
+|---|---|
+| SW1 | 上 |
+| SW3 | 下 |
+| SW2 | 选择 |
+| SW2 长按 | 从任意位置回主页 |
+
+- 每个子列表的**第一项就是 `Back`**——返回是一个可见选项，不是隐藏模式
+- 可调项（波特率/亮度/缓冲/深度）用 SW1/SW3 直接改值，底部状态行反色显示当前值
+- RX 监视屏用 SW1/SW3 回看历史；其他只读屏上这两个键**不做别的含义**
+- 选中项是**反色高亮条**，每次绘制前先清该行背景（否则上一行更长的文本会留下残影）
+- 布局固定 4 行：y=0 标题、y=16/32 内容、y=48 状态行；字体单元 16px，画到 y>48 会被裁掉
 - **无面板也能用**：OLED 初始化失败仅告警，所有功能仍可通过网络访问
+
+> 这套结构（静态选项表 + 回调、`Back` 作为普通选项、无导航状态机）照搬自成熟固件的
+> 做法（主要是 Meshtastic 的 `MenuHandler`/`SharedUIDisplay`），而不是自创：
+> 早期版本用了一套 `stack`/`depth`/`cursor`/`view` 全局状态机，四者必须互相一致，
+> 实际出现的每个菜单 bug 都来自其中两者不一致。
 
 ### 🕒 带时间戳的抓包历史
 

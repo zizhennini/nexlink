@@ -6,87 +6,73 @@
 #include "freertos/task.h"
 #include "oled_ssd1306.h"
 
-/* The panel cell is 8x16, so a 16px-tall band is one text row. */
-#define SPLASH_ROWS      4
-#define BAR_Y            46
-#define BAR_H            8
-#define BAR_MARGIN       8
-#define BAR_W            (OLED_WIDTH - 2 * BAR_MARGIN)
+/* The panel cell is 8x16, so one text row occupies 16px of the 64px height. */
+#define WORDMARK     "NexLink"
+#define WORDMARK_LEN 7
 
-static void text_centered(int y, const char *s, bool inv)
-{
-    int n = (int)strlen(s);
-    int w = n * OLED_CHAR_W;
-    int x = (OLED_WIDTH - w) / 2;
-    if (x < 0) x = 0;
-    oled_text(x, y, s, inv);
-}
+/* A "big" wordmark without a second font: draw each glyph twice, one pixel
+ * column apart. That doubles the stroke weight enough to read as a title at
+ * 128px wide, and costs nothing but a second blit. */
+#define WORDMARK_W   (WORDMARK_LEN * OLED_CHAR_W + 1)
 
-static void text_scaled(int y, const char *s)
+#define WORDMARK_Y   24            /* vertically centred-ish: 24..40 */
+
+static void draw_wordmark(int x)
 {
-    /* A "big" wordmark without a second font: draw each character twice, one
-     * pixel column to the right, which doubles the horizontal weight enough to
-     * read as a title at 128px wide. */
-    int n = (int)strlen(s);
-    int w = n * OLED_CHAR_W + 1;
-    int x = (OLED_WIDTH - w) / 2;
-    if (x < 0) x = 0;
-    for (int i = 0; i < n; i++) {
-        oled_char(x + i * OLED_CHAR_W,         y, s[i], false);
-        oled_char(x + i * OLED_CHAR_W + 1,     y, s[i], false);
+    for (int i = 0; i < WORDMARK_LEN; i++) {
+        oled_char(x + i * OLED_CHAR_W,     WORDMARK_Y, WORDMARK[i], false);
+        oled_char(x + i * OLED_CHAR_W + 1, WORDMARK_Y, WORDMARK[i], false);
     }
 }
 
-static void draw_bar(int filled_px)
+/* Clear the strip the wordmark moves through, so a previous frame's pixels can
+ * never survive as "ghosting" behind the next one. The doubled glyph is one
+ * pixel wider than its cell, which is exactly the kind of overlap that shows
+ * up as two words on top of each other. */
+static void clear_wordmark_band(void)
 {
-    oled_rect(BAR_MARGIN, BAR_Y, BAR_W, BAR_H, true);
-    if (filled_px > 0) {
-        if (filled_px > BAR_W - 2) filled_px = BAR_W - 2;
-        oled_fill_rect(BAR_MARGIN + 1, BAR_Y + 1, filled_px, BAR_H - 2, true);
+    oled_fill_rect(0, WORDMARK_Y - 1, OLED_WIDTH, 18, false);
+}
+
+void boot_splash_run(int ms)
+{
+    if (ms < 120) ms = 120;
+
+    const int steps = 18;
+    const int frame_ms = ms / steps > 0 ? ms / steps : 6;
+    const int travel = OLED_WIDTH - WORDMARK_W;   /* slide distance */
+
+    for (int s = 0; s <= steps; s++) {
+        /* Ease-out: fast at first, settling at the end (quadratic, fixed point
+         * so there is no floating point in the boot path). */
+        int t = s * 100 / steps;                   /* 0..100 */
+        int eased = 100 - ((100 - t) * (100 - t)) / 100;
+        int x = travel - (travel * eased) / 100;
+
+        oled_clear();
+        clear_wordmark_band();
+        draw_wordmark(x);
+        oled_flush();
+
+        vTaskDelay(pdMS_TO_TICKS(frame_ms));
     }
+
+    /* A short hold on the settled wordmark, so the transition into the menu
+     * reads as intentional rather than as a flicker. */
+    vTaskDelay(pdMS_TO_TICKS(220));
 }
 
 void boot_splash_ready(const char *ip)
 {
     oled_clear();
-    text_scaled(4, "NEXLINK");
+    clear_wordmark_band();
+    draw_wordmark((OLED_WIDTH - WORDMARK_W) / 2);
 
     if (ip && ip[0]) {
-        text_centered(24, "ready at", false);
-        text_centered(40, ip, false);
-    } else {
-        text_centered(24, "wireless", false);
-        text_centered(40, "debugger", false);
+        int w = (int)strlen(ip) * OLED_CHAR_W;
+        int x = (OLED_WIDTH - w) / 2;
+        if (x < 0) x = 0;
+        oled_text(x, 44, ip, false);
     }
-
-    oled_hline(0, 58, OLED_WIDTH, true);
     oled_flush();
-}
-
-void boot_splash_run(const char *ip, int ms)
-{
-    if (ms < 100) ms = 100;
-
-    /* Steps chosen so the whole sweep is ~ms long; each step is one flush. */
-    const int steps = 24;
-    const int delay_ms = ms / steps > 0 ? ms / steps : 4;
-
-    for (int s = 0; s <= steps; s++) {
-        oled_clear();
-
-        text_scaled(4, "NEXLINK");
-        text_centered(24, "wireless debugger", false);
-
-        /* A one-line status that also proves the font row is aligned. */
-        if (s < steps / 2) text_centered(40, "booting...", false);
-        else               text_centered(40, ip && ip[0] ? ip : "starting", false);
-
-        draw_bar((BAR_W - 2) * s / steps);
-        oled_flush();
-
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
-    }
-
-    /* Hold the completed bar briefly so the transition is not a flicker. */
-    vTaskDelay(pdMS_TO_TICKS(150));
 }

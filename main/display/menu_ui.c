@@ -1,47 +1,45 @@
 /*
  * menu_ui.c - OLED menu for NexLink (SSD1306 128x64, I2C).
  *
- * WHY THIS WAS REWRITTEN
- * ----------------------
- * The previous menu was an eight-page ring in which the home screen was BOTH a
- * launcher and one of the ring stops. That made the same two buttons mean
- * different things in different places: on home SW1/SW3 moved a cursor, on any
- * other page they switched pages. The config screen had its own private
- * list/edit state machine on top, and crammed eleven items into one page under
- * abbreviations (SBuf, SHist, RHist, NetRst...).
+ * PATTERN (copied from how the mature firmware menus are actually written)
+ * -----------------------------------------------------------------------
+ * This file was rewritten after reading the real source of Meshtastic's menu
+ * layer (src/graphics/draw/MenuHandler.{h,cpp} and SharedUIDisplay.cpp). The
+ * pattern those use, and which this now follows, is:
  *
- * This version makes three concepts framework-level instead of per-page:
+ *   1. A menu IS A TABLE. A static array of option labels plus a dispatch
+ *      callback that switches on the selected index. Nothing else.
+ *   2. "Back" IS AN ORDINARY ITEM, item 0 of every nested list. Going back is a
+ *      visible choice, not an invisible mode.
+ *   3. NO NAVIGATION STATE MACHINE. There is exactly one cursor and one
+ *      "current menu" pointer in this whole file. The previous revision kept a
+ *      stack, a depth, a view enum, a selected index and a scroll offset that
+ *      all had to agree with each other, and every bug it had came from two of
+ *      them disagreeing. A table + a callback cannot get out of sync.
+ *   4. CLEAR BEFORE DRAWING. The selection is an inverted band: the band is
+ *      filled black first and the glyphs are drawn inverted on top. The
+ *      reference code does `setColor(BLACK); fillRect(...)` before every
+ *      highlight for the same reason - without it, a longer previous line
+ *      leaves its tail pixels behind and two strings appear on top of each
+ *      other.
  *
- *   1. A GROUPED TREE. Home is a plain list of four groups; each group is a
- *      list of entries. An entry is one of four kinds: another list, a
- *      read-only screen, a one-shot action, or an adjustable value. Pages are
- *      pushed on a small return stack, so "SW2 = enter / back" is the entire
- *      input model and the tree can grow without new key logic.
+ * KEY MODEL (one meaning everywhere, no per-page exceptions)
+ *   SW1 = up      SW3 = down      SW2 = select
+ *   SW2 held      = back to the root list
  *
- *   2. ONE KEY MEANING EVERYWHERE (the point of the rewrite):
- *        SW1 = up      SW3 = down      SW2 = enter / back
- *        SW2 long      = jump home from anywhere, including edit mode
- *      On a read-only screen SW1/SW3 scroll its body when it has one (only the
- *      live RX monitor does) and are inert otherwise - they never silently
- *      mean something else.
+ * LAYOUT (the panel is 4 rows of 16px: y = 0, 16, 32, 48)
+ *   y=0   title, with a separator line under it
+ *   y=16  menu items, one per row, up to 3 visible, window follows the cursor
+ *   y=48  status/hint row (also the value editor for adjustable entries)
  *
- *   3. A FRAMEWORK-LEVEL EDIT MODE. An adjustable entry is edited by the same
- *      code path wherever it lives: SW2 enters, SW1/SW3 change the value, SW2
- *      confirms. The five-second idle exit is kept - an editor the user walked
- *      away from must never swallow the escape gesture.
- *
- * PAINTING RULE (unchanged from the previous implementation)
- * ----------------------------------------------------------
- * Only the UI task ever touches the panel: button handlers mutate state and
- * kick the UI task through s_kick; menu_render() snapshots and flushes. The
- * panel sits on a shared I2C bus with the I2C monitor, so a second writer
- * would corrupt both.
+ * PAINTING RULE: menu_render() is called from the UI task only. Key handlers
+ * mutate a cursor and kick that task; they never touch the panel. The OLED
+ * shares I2C with the I2C monitor, so a second writer would corrupt both.
  */
 #include "menu_ui.h"
 
 #include <stdio.h>
 #include <string.h>
-#include <strings.h>
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_system.h"
@@ -68,346 +66,149 @@
 
 static const char *TAG = "menu";
 
+/* Defined in main.c. Declared here rather than exporting a private header. */
+extern const char *main_boot_reason(void);
+extern bool        dap_usb_is_started(void);
+extern uint32_t    dap_usb_configured_count(void);
+extern uint32_t    dap_usb_get_rx_packets(void);
+extern uint32_t    dap_usb_get_tx_packets(void);
+
 /* ------------------------------------------------------------------ */
-/*  Layout                                                             */
+/*  Geometry                                                           */
 /*                                                                     */
-/*  The font cell is 16px tall, so the panel holds exactly four text    */
-/*  rows from y=0 to y=48 (48+16 = 64 = the last pixel row). The layout */
-/*  is therefore: title bar on row 0, up to THREE content rows, and the */
-/*  key hint as the fourth row. Anything drawn below y=48 is clipped -  */
-/*  an earlier revision put the hint at y=55 and lost its bottom third. */
+/*  Font cell is 8x16, so the panel is exactly four rows: y=0/16/32/48. */
+/*  Anything drawn at y>48 is clipped, and the doubled wordmark in the  */
+/*  splash is one pixel wider than its cell - both are classic sources  */
+/*  of "overlapping" text, so every draw here is bounded to a row.      */
 /* ------------------------------------------------------------------ */
 
 #define ROW_TITLE_Y   0
-#define ROW1_Y        16
-#define ROW2_Y        32
-#define ROW3_Y        48
-
-/* Content rows available below the title, leaving row 3 for the hint. */
-#define BODY_ROWS     3
-
-/* Text columns that actually fit (128px / 8px per cell). */
-#define TEXT_COLS     16
+#define ROW_ITEM_Y    16          /* first item row */
+#define ROW_STATUS_Y  48          /* last row: hint or value editor */
+#define ITEM_ROWS     3           /* rows available for items */
+#define TEXT_COLS     16          /* 128 / 8 */
 
 /* ------------------------------------------------------------------ */
-/*  RX line history (fed by the serial bridge callback)                */
+/*  Menu table types                                                   */
+/* ------------------------------------------------------------------ */
+
+typedef struct menu_def menu_def_t;
+
+/* Dispatch: called with the index of the item SW2 was pressed on.
+ * Navigate by assigning to s_menu / s_screen. */
+typedef void (*menu_dispatch_t)(int selected);
+
+/* Optional value handler: when set, SW1/SW3 adjust the value instead of moving
+ * the cursor. One editor for every adjustable setting, no per-page edit state. */
+typedef void (*menu_adjust_t)(int dir);
+
+struct menu_def {
+    const char          *title;
+    const char *const   *items;
+    uint8_t              count;
+    menu_dispatch_t      dispatch;
+    menu_adjust_t        adjust;   /* NULL for a plain list */
+};
+
+/* What the panel is currently showing. */
+typedef enum { SCREEN_LIST, SCREEN_INFO } screen_t;
+
+/* ------------------------------------------------------------------ */
+/*  State: ONE cursor, ONE menu pointer, ONE screen id. That is all.    */
+/* ------------------------------------------------------------------ */
+
+static const menu_def_t *s_menu;      /* current list                       */
+static int               s_cursor;    /* index into s_menu->items           */
+static screen_t          s_screen = SCREEN_LIST;
+static int               s_page   = MENU_HOME;  /* reported to /api/status   */
+
+/* ------------------------------------------------------------------ */
+/*  RX line history                                                    */
 /* ------------------------------------------------------------------ */
 
 #define RX_LINE_MAX   60
 #define RX_LINE_CAP   100
-static char  s_rx_lines[RX_LINE_CAP][RX_LINE_MAX + 1];
-static int   s_rx_line_len[RX_LINE_CAP];
+static char s_rx_lines[RX_LINE_CAP][RX_LINE_MAX + 1];
+static int  s_rx_line_len[RX_LINE_CAP];
 static volatile int s_rx_line_w = 0;
 static volatile int s_rx_line_n = 0;
 static volatile int s_rx_hist_max = 50;
-static int   s_rx_cur_col = 0;
-static bool  s_rx_hex_mode = false;
+static int  s_rx_cur_col = 0;
+static bool s_rx_hex_mode = false;
+static int  s_rx_scroll = 0;
 
-/* Content width: 128px minus the 2px margin and the "> " prefix. */
 #define RX_CONTENT_PX  108
 
-/* ================================================================== */
-/*  Menu tree types                                                    */
-/* ================================================================== */
-
-typedef struct menu_list menu_list_t;
-
-typedef enum {
-    ENTRY_LIST,     /* push another list                              */
-    ENTRY_SCREEN,   /* open a read-only screen (page id)              */
-    ENTRY_ACTION,   /* run fn() once                                  */
-    ENTRY_VALUE,    /* edit: index into a value table, applied by fn() */
-} entry_kind_t;
-
-typedef struct {
-    const char  *label;
-    entry_kind_t kind;
-    union {
-        const menu_list_t *list;               /* ENTRY_LIST */
-        int                page;               /* ENTRY_SCREEN */
-        void             (*fn)(void);          /* ENTRY_ACTION */
-        struct {                               /* ENTRY_VALUE */
-            int8_t      *idx;
-            uint8_t      count;
-            const int   *table;
-            void       (*apply)(int value);
-            const char  *unit;
-        } val;
-    } u;
-} menu_entry_t;
-
-struct menu_list {
-    const char         *title;
-    const menu_entry_t *items;
-    uint8_t             count;
-};
-
-/* ================================================================== */
-/*  Forward declarations                                               */
-/* ================================================================== */
-
-static const menu_list_t list_root;
-static const menu_list_t list_monitor;
-static const menu_list_t list_probe;
-static const menu_list_t list_system;
-static const menu_list_t list_info;
-
-static void act_clear_rx(void);
-static void act_clear_capture(void);
-static void act_reset_target(void);
-static void act_swd_idcode(void);
-static void act_usb_off(void);
-static void act_usb_dap(void);
-static void act_usb_ttl(void);
-static void act_wifi_ap(void);
-
-/* ================================================================== */
-/*  Configurable values                                                */
-/* ================================================================== */
-
-static const int val_bauds[]  = {9600, 115200, 460800, 921600};
-static const int val_bright[] = {10, 25, 50, 75, 100};
-static const int val_bufs[]   = {1024, 2048, 4096, 8192};
-static const int val_hist[]   = {10, 30, 50, 100};
-
-#define N_BAUD   4
-#define N_BRIGHT 5
-#define N_BUF    4
-#define N_HIST   4
-
-static int8_t s_baud_idx;
-static int8_t s_bright_idx;
-static int8_t s_buf_idx;
-static int8_t s_shist_idx;
-static int8_t s_ihist_idx;
-static int8_t s_rhist_idx;
-
-static void apply_baud(int v)   { serial_bridge_set_baud((uint32_t)v); }
-static void apply_bright(int v) { oled_set_contrast((uint8_t)((v * 255) / 100)); }
-static void apply_buf(int v)    { serial_bridge_set_bufsize((size_t)v); }
-static void apply_shist(int v)  { spi_mon_set_history_max(v); }
-static void apply_ihist(int v)  { i2c_mon_set_history_max(v); }
-static void apply_rhist(int v)  { menu_set_rx_hist_max(v); }
-
-/* ================================================================== */
-/*  List contents                                                      */
-/* ================================================================== */
-
-static const menu_entry_t items_monitor[] = {
-    { "RX Monitor",    ENTRY_SCREEN, { .page = MENU_RX_MON } },
-    { "I2C Bus",       ENTRY_SCREEN, { .page = MENU_I2C } },
-    { "SPI Bus",       ENTRY_SCREEN, { .page = MENU_SPI } },
-    { "PWM Measure",   ENTRY_SCREEN, { .page = MENU_PWM } },
-    { "Capture Log",   ENTRY_SCREEN, { .page = MENU_CAPTURE } },
-    { "Clear RX Hist", ENTRY_ACTION, { .fn = act_clear_rx } },
-    { "Clear Capture", ENTRY_ACTION, { .fn = act_clear_capture } },
-};
-static const menu_list_t list_monitor = {
-    "Monitor", items_monitor, sizeof(items_monitor) / sizeof(items_monitor[0])
-};
-
-static const menu_entry_t items_probe[] = {
-    { "SWD / JTAG",   ENTRY_SCREEN, { .page = MENU_SWD } },
-    { "Read IDCODE",  ENTRY_ACTION, { .fn = act_swd_idcode } },
-    { "Reset Target", ENTRY_ACTION, { .fn = act_reset_target } },
-    { "USB: off",     ENTRY_ACTION, { .fn = act_usb_off } },
-    { "USB: probe",   ENTRY_ACTION, { .fn = act_usb_dap } },
-    { "USB: serial",  ENTRY_ACTION, { .fn = act_usb_ttl } },
-};
-static const menu_list_t list_probe = {
-    "Probe", items_probe, sizeof(items_probe) / sizeof(items_probe[0])
-};
-
-static const menu_entry_t items_system[] = {
-    { "UART Baud",     ENTRY_VALUE, { .val = { &s_baud_idx,   N_BAUD,   val_bauds,  apply_baud,   "bps" } } },
-    { "Brightness",    ENTRY_VALUE, { .val = { &s_bright_idx, N_BRIGHT, val_bright, apply_bright, "%"   } } },
-    { "UART Buffer",   ENTRY_VALUE, { .val = { &s_buf_idx,    N_BUF,    val_bufs,   apply_buf,    "B"   } } },
-    { "SPI Depth",     ENTRY_VALUE, { .val = { &s_shist_idx,  N_HIST,   val_hist,   apply_shist,  "rec" } } },
-    { "I2C Depth",     ENTRY_VALUE, { .val = { &s_ihist_idx,  N_HIST,   val_hist,   apply_ihist,  "rec" } } },
-    { "RX Lines",      ENTRY_VALUE, { .val = { &s_rhist_idx,  N_HIST,   val_hist,   apply_rhist,  "ln"  } } },
-    { "WiFi: AP Mode", ENTRY_ACTION, { .fn = act_wifi_ap } },
-};
-static const menu_list_t list_system = {
-    "System", items_system, sizeof(items_system) / sizeof(items_system[0])
-};
-
-static const menu_entry_t items_info[] = {
-    { "Device Status", ENTRY_SCREEN, { .page = MENU_STATUS } },
-    { "Network",       ENTRY_SCREEN, { .page = MENU_NET } },
-    { "Firmware",      ENTRY_SCREEN, { .page = MENU_FIRMWARE } },
-    { "USB Role",      ENTRY_SCREEN, { .page = MENU_USB_STATE } },
-    { "AI / MCP",      ENTRY_SCREEN, { .page = MENU_AI } },
-};
-static const menu_list_t list_info = {
-    "Info", items_info, sizeof(items_info) / sizeof(items_info[0])
-};
-
-static const menu_entry_t items_root[] = {
-    { "Monitor", ENTRY_LIST, { .list = &list_monitor } },
-    { "Probe",   ENTRY_LIST, { .list = &list_probe   } },
-    { "System",  ENTRY_LIST, { .list = &list_system  } },
-    { "Info",    ENTRY_LIST, { .list = &list_info    } },
-};
-static const menu_list_t list_root = {
-    "NexLink", items_root, sizeof(items_root) / sizeof(items_root[0])
-};
-
-/* ================================================================== */
-/*  Navigation state                                                   */
-/* ================================================================== */
-
-#define STACK_MAX 6
-
-typedef enum {
-    VIEW_LIST,     /* a list from the tree             */
-    VIEW_SCREEN,   /* a read-only screen               */
-    VIEW_EDIT,     /* editing s_edit                   */
-} view_t;
-
-static view_t             s_view = VIEW_LIST;
-static const menu_list_t *s_stack[STACK_MAX];
-static int                s_cursor[STACK_MAX];
-static int                s_depth = 1;          /* root is level 0 */
-static int                s_screen_page = MENU_HOME;
-static int                s_selected = 0;
-static int                s_scroll = 0;         /* RX monitor scroll-back */
-
-static const menu_entry_t *s_edit;
-static uint32_t            s_edit_ts;
-
-/* SWD result shown by the SWD/JTAG screen. */
+/* SWD result, shown by the SWD screen. */
 static uint32_t s_swd_idcode;
 static bool     s_swd_idcode_valid;
 static int      s_swd_last_err;
 
-/* Animation + cross-task wakeup.
- *
- * The slide animation of the old page-ring is gone: with a grouped list tree
- * the useful motion is the cursor, and a full-screen slide on every list push
- * made the (slow, shared-I2C) panel visibly lag. s_anim_* is kept only because
- * oled_slide_from() is still available if a future transition wants it. */
-static uint8_t           s_anim_old[OLED_FB_BYTES] __attribute__((unused));
-static volatile bool     s_anim_pending __attribute__((unused));
-static volatile int      s_anim_dir     __attribute__((unused));
+/* Value editor state. Every adjustable setting shares this one display slot:
+ * the editor function writes the value it just applied, so the status row can
+ * show "115200 bps" rather than the table index. */
+static int s_ed_idx;
+static int s_ed_step;
+static int s_ed_show;
+static const char *s_ed_unit;
+
 static SemaphoreHandle_t s_kick;
-static SemaphoreHandle_t s_nav_lock;
 
-/* Defined in main.c; declared here rather than pulling in a private header. */
-extern const char *main_boot_reason(void);
-
-/* ================================================================== */
+/* ------------------------------------------------------------------ */
 /*  Small helpers                                                      */
-/* ================================================================== */
+/* ------------------------------------------------------------------ */
 
-static uint32_t now_s(void)
+static void ui_kick(void) { if (s_kick) xSemaphoreGive(s_kick); }
+
+/* Text helpers. Every one of these clears the row it is about to draw into,
+ * which is what stops a shorter new string from leaving the tail of the old
+ * one on screen. */
+static void row_clear(int y) { oled_fill_rect(0, y, OLED_WIDTH, 16, false); }
+
+static void row_text(int y, const char *s, bool inverted)
 {
-    return (uint32_t)(esp_timer_get_time() / 1000000LL);
-}
-
-static void ui_kick(void)
-{
-    if (s_kick) xSemaphoreGive(s_kick);
-}
-
-#define EDIT_TIMEOUT_S 5
-
-/* True while an entry is being edited. Auto-exits after a period of no input
- * (Marlin behaviour). Called from both tasks; the volatile 32-bit store cannot
- * tear into a wrong value, so the worst case is one stale frame. */
-static bool edit_active(void)
-{
-    if (s_view != VIEW_EDIT) return false;
-    if (now_s() - s_edit_ts >= EDIT_TIMEOUT_S) {
-        s_view = VIEW_LIST;
-        return false;
-    }
-    return true;
-}
-
-/* ================================================================== */
-/*  Actions                                                            */
-/* ================================================================== */
-
-static void act_clear_rx(void)      { menu_clear_rx(); }
-static void act_clear_capture(void) { capture_reset_counters(); }
-
-static void act_reset_target(void)
-{
-    /* NRST is a plain GPIO, so this works even when the target is wedged and
-     * no SWD link can be established. */
-    swd_bus_lock();
-    swd_reset_target(true);
-    vTaskDelay(pdMS_TO_TICKS(25));
-    swd_reset_target(false);
-    swd_bus_unlock();
-    ESP_LOGI(TAG, "target reset pulse sent");
-}
-
-static void act_swd_idcode(void)
-{
-    /* The SWD pads are shared with the USB/TCP DAP transports, so hold the bus
-     * across the sequence. */
-    swd_bus_lock();
-    uint32_t id = 0;
-    esp_err_t e = swd_read_idcode(&id);
-    swd_bus_unlock();
-
-    if (e == ESP_OK) {
-        s_swd_idcode = id;
-        s_swd_idcode_valid = true;
-        s_swd_last_err = 0;
-        ESP_LOGI(TAG, "SWD IDCODE = 0x%08lX", (unsigned long)id);
+    char line[TEXT_COLS + 1];
+    snprintf(line, sizeof(line), "%-*.*s", TEXT_COLS, TEXT_COLS, s);
+    row_clear(y);
+    if (inverted) {
+        /* Selection band: fill the row, then draw the glyphs inverted so they
+         * punch through it. */
+        oled_fill_rect(0, y, OLED_WIDTH, 16, true);
+        oled_text(0, y, line, true);
     } else {
-        s_swd_idcode_valid = false;
-        s_swd_last_err = (int)swd_get_last_ack();
-        ESP_LOGW(TAG, "SWD IDCODE read failed (ack=%d)", s_swd_last_err);
+        oled_text(0, y, line, false);
     }
-    /* Show the result instead of only flashing it: switch to the SWD screen. */
-    s_screen_page = MENU_SWD;
-    s_scroll = 0;
-    s_view = VIEW_SCREEN;
-    ui_kick();
 }
 
-/* A USB role change reboots the board (a live USB stack is never torn down),
- * so tell the user before restarting instead of appearing to hang. */
-static void usb_role_confirm(uint8_t mode, const char *label)
+static void row_kv(int y, const char *k, const char *v)
 {
-    pin_config_set_usb_mode(mode);
-    oled_clear();
-    oled_text(2, ROW1_Y, "USB role ->", false);
-    oled_text(2, ROW2_Y, label, false);
-    oled_text(2, ROW3_Y, "rebooting...", false);
-    oled_flush();
-    vTaskDelay(pdMS_TO_TICKS(1200));
-    esp_restart();
+    char line[TEXT_COLS + 1];
+    snprintf(line, sizeof(line), "%-6.6s%.10s", k, v);
+    row_text(y, line, false);
 }
 
-static void act_usb_off(void) { usb_role_confirm(USB_MODE_OFF, "off"); }
-static void act_usb_dap(void) { usb_role_confirm(USB_MODE_DAP, "probe"); }
-static void act_usb_ttl(void) { usb_role_confirm(USB_MODE_TTL, "serial"); }
-
-static void act_wifi_ap(void)
+static void title_row(const char *title)
 {
-    wifi_manager_start_ap();
-    oled_clear();
-    oled_text(2, ROW1_Y, "WiFi AP mode", false);
-    oled_text(2, ROW2_Y, "started", false);
-    oled_flush();
-    vTaskDelay(pdMS_TO_TICKS(1200));
+    char line[TEXT_COLS + 1];
+    snprintf(line, sizeof(line), "%-*.*s", TEXT_COLS, TEXT_COLS, title);
+    row_clear(ROW_TITLE_Y);
+    oled_text(0, ROW_TITLE_Y, line, false);
+    oled_hline(0, 15, OLED_WIDTH, true);
 }
 
-/* ================================================================== */
-/*  RX line history                                                    */
-/* ================================================================== */
-
-static void rx_new_line(void)
+static void open_menu(const menu_def_t *m, int page)
 {
-    s_rx_line_w = (s_rx_line_w + 1) % s_rx_hist_max;
-    if (s_rx_line_n < s_rx_hist_max) s_rx_line_n++;
-    s_rx_lines[s_rx_line_w][0] = '\0';
-    s_rx_line_len[s_rx_line_w] = 0;
-    s_rx_cur_col = 0;
+    s_menu = m;
+    s_cursor = 0;
+    s_screen = SCREEN_LIST;
+    s_page = page;
+}
+
+static void open_info(int page)
+{
+    s_screen = SCREEN_INFO;
+    s_page = page;
+    s_rx_scroll = 0;
 }
 
 void menu_clear_rx(void)
@@ -424,8 +225,7 @@ void menu_set_rx_hist_max(int m)
     if (m < 2) m = 2;
     if (m > RX_LINE_CAP) m = RX_LINE_CAP;
     s_rx_hist_max = m;
-    /* Clear together: otherwise s_rx_line_w could point outside the new window
-     * and the ring would read entries that are no longer part of it. */
+    /* Clear with the resize, or s_rx_line_w can point outside the new window. */
     menu_clear_rx();
 }
 
@@ -439,7 +239,11 @@ static int char_pixel_width(unsigned char c)
 
 static void push_serial_data(char prefix, const uint8_t *data, uint32_t len)
 {
-    if (s_rx_cur_col > 0) rx_new_line();
+    if (s_rx_cur_col > 0) {
+        s_rx_line_w = (s_rx_line_w + 1) % s_rx_hist_max;
+        if (s_rx_line_n < s_rx_hist_max) s_rx_line_n++;
+        s_rx_cur_col = 0;
+    }
     if (s_rx_line_n == 0) s_rx_line_n = 1;
 
     s_rx_lines[s_rx_line_w][0] = prefix;
@@ -452,16 +256,21 @@ static void push_serial_data(char prefix, const uint8_t *data, uint32_t len)
     for (uint32_t i = 0; i < len; i++) {
         char c = (char)data[i];
         if (c == '\r') continue;
-        if (c == '\n') { rx_new_line(); continue; }
+        if (c == '\n') {
+            s_rx_line_w = (s_rx_line_w + 1) % s_rx_hist_max;
+            if (s_rx_line_n < s_rx_hist_max) s_rx_line_n++;
+            s_rx_lines[s_rx_line_w][0] = '\0';
+            s_rx_line_len[s_rx_line_w] = 0;
+            s_rx_cur_col = 0;
+            continue;
+        }
 
         char hexbuf[5];
-        const char *ins;
         char one[2] = { c, '\0' };
+        const char *ins = one;
         if (s_rx_hex_mode) {
             snprintf(hexbuf, sizeof(hexbuf), "%02X ", (uint8_t)c);
             ins = hexbuf;
-        } else {
-            ins = one;
         }
 
         int w = 0;
@@ -469,7 +278,8 @@ static void push_serial_data(char prefix, const uint8_t *data, uint32_t len)
         if (w == 0) continue;
 
         if (display_w + w > RX_CONTENT_PX) {
-            rx_new_line();
+            s_rx_line_w = (s_rx_line_w + 1) % s_rx_hist_max;
+            if (s_rx_line_n < s_rx_hist_max) s_rx_line_n++;
             s_rx_lines[s_rx_line_w][0] = prefix;
             s_rx_lines[s_rx_line_w][1] = ' ';
             s_rx_cur_col = 2;
@@ -491,87 +301,262 @@ void menu_push_rx_data(const uint8_t *data, uint32_t len) { push_serial_data('>'
 void menu_push_tx_data(const uint8_t *data, uint32_t len) { push_serial_data('<', data, len); }
 
 /* ================================================================== */
-/*  Text helpers                                                       */
+/*  Actions                                                            */
 /* ================================================================== */
 
-static void page_header(const char *title)
+static void act_reset_target(void)
 {
-    char line[TEXT_COLS + 1];
-    /* Truncate explicitly: oled_text() draws whatever it is given, straight
-     * past the right edge of the panel. */
-    snprintf(line, sizeof(line), "%-*.*s", TEXT_COLS, TEXT_COLS, title);
-    oled_text(0, ROW_TITLE_Y, line, false);
-    oled_hline(0, ROW_TITLE_Y + 15, OLED_WIDTH, true);
+    swd_bus_lock();
+    swd_reset_target(true);
+    vTaskDelay(pdMS_TO_TICKS(25));
+    swd_reset_target(false);
+    swd_bus_unlock();
+    ESP_LOGI(TAG, "target reset pulse sent");
 }
 
-/* One "key value" line. The key gets 6 columns, the value the remaining 9. */
-static void row_kv(int y, const char *key, const char *value)
+static void act_swd_idcode(void)
 {
-    char line[TEXT_COLS + 1];
-    snprintf(line, sizeof(line), "%-6.6s%.10s", key, value);
-    line[TEXT_COLS] = '\0';
-    oled_text(0, y, line, false);
+    swd_bus_lock();
+    uint32_t id = 0;
+    esp_err_t e = swd_read_idcode(&id);
+    swd_bus_unlock();
+
+    if (e == ESP_OK) {
+        s_swd_idcode = id;
+        s_swd_idcode_valid = true;
+        s_swd_last_err = 0;
+        ESP_LOGI(TAG, "SWD IDCODE = 0x%08lX", (unsigned long)id);
+    } else {
+        s_swd_idcode_valid = false;
+        s_swd_last_err = (int)swd_get_last_ack();
+        ESP_LOGW(TAG, "SWD IDCODE read failed (ack=%d)", s_swd_last_err);
+    }
+    open_info(MENU_SWD);          /* show the result instead of only flashing it */
+    ui_kick();
 }
 
-/* Key hint on the bottom row (y=48). Text is padded to the full width so a
- * shorter hint does not leave tail characters from the previous screen. */
-static void footer(const char *hint)
+static void usb_role_confirm(uint8_t mode, const char *label)
 {
-    char line[TEXT_COLS + 1];
-    snprintf(line, sizeof(line), "%-*.*s", TEXT_COLS, TEXT_COLS, hint);
-    oled_text(0, ROW3_Y, line, false);
-}
-
-/* Centred line, for hint/status text that is shorter than the panel. */
-static void centered(int y, const char *text)
-{
-    int n = (int)strlen(text);
-    if (n > TEXT_COLS) n = TEXT_COLS;
-    int x = (OLED_WIDTH - n * OLED_CHAR_W) / 2;
-    if (x < 0) x = 0;
-    char line[TEXT_COLS + 1];
-    snprintf(line, sizeof(line), "%.*s", TEXT_COLS, text);
-    oled_text(x, y, line, false);
+    pin_config_set_usb_mode(mode);
+    oled_clear();
+    row_text(ROW_ITEM_Y, "USB role ->", false);
+    row_text(ROW_ITEM_Y + 16, label, false);
+    row_text(ROW_STATUS_Y, "rebooting...", false);
+    oled_flush();
+    vTaskDelay(pdMS_TO_TICKS(1200));
+    esp_restart();
 }
 
 /* ================================================================== */
-/*  Read-only screens                                                  */
-/*                                                                    */
-/*  Layout contract for every screen:                                  */
-/*    y=16, y=32   two rows of key/value detail                        */
-/*    y=48         hint row (footer) - never long body text            */
-/*  Three content rows plus a hint would need a fifth row, which the   */
-/*  panel does not have. A screen that genuinely needs a third value   */
-/*  line uses compact() to fold it into row 2.                         */
+/*  The menus. Each one is a table + a callback, nothing more.         */
 /* ================================================================== */
 
-static void screen_status(void)
+void menu_on_sw1_press(void);
+void menu_on_sw3_press(void);
+
+/* ---- Monitor ---- */
+static const char *const mon_items[] = {
+    "Back", "RX Monitor", "I2C Bus", "SPI Bus", "PWM", "Capture Log", "Clear RX Hist",
+};
+static void mon_dispatch(int sel)
+{
+    switch (sel) {
+    case 1: open_info(MENU_RX_MON);   break;
+    case 2: open_info(MENU_I2C);      break;
+    case 3: open_info(MENU_SPI);      break;
+    case 4: open_info(MENU_PWM);      break;
+    case 5: open_info(MENU_CAPTURE);  break;
+    case 6: menu_clear_rx();          break;
+    default: break;   /* 0 = Back, handled centrally in menu_on_sw2_press */
+    }
+}
+
+/* ---- Probe ---- */
+static const char *const probe_items[] = {
+    "Back", "SWD / JTAG", "Read IDCODE", "Reset Target", "USB: off", "USB: probe", "USB: serial",
+};
+static void probe_dispatch(int sel)
+{
+    switch (sel) {
+    case 1: open_info(MENU_SWD);                    break;
+    case 2: act_swd_idcode();                       break;
+    case 3: act_reset_target();                     break;
+    case 4: usb_role_confirm(USB_MODE_OFF, "off");  break;
+    case 5: usb_role_confirm(USB_MODE_DAP, "probe");break;
+    case 6: usb_role_confirm(USB_MODE_TTL, "serial");break;
+    default: break;
+    }
+}
+
+/* ---- System: adjustable values live on the status row ---- */
+static void ed_baud(int dir)
+{
+    static const int tbl[] = {9600, 115200, 460800, 921600};
+    if (dir == 0) {   /* opening: seed from the live rate */
+        uint32_t b = 0;
+        uart_get_baudrate(UART1_PORT_NUM, &b);
+        s_ed_idx = 1;
+        for (int i = 0; i < 4; i++) if ((uint32_t)tbl[i] == b) s_ed_idx = i;
+        s_ed_show = tbl[s_ed_idx];
+        s_ed_step = 1; s_ed_unit = "bps";
+        return;
+    }
+    s_ed_idx = (s_ed_idx + dir + 4) % 4;
+    serial_bridge_set_baud((uint32_t)tbl[s_ed_idx]); s_ed_show = tbl[s_ed_idx];
+}
+
+static void ed_bright(int dir)
+{
+    static const int tbl[] = {10, 25, 50, 75, 100};
+    if (dir == 0) { s_ed_idx = 4; s_ed_step = 1; s_ed_unit = "%"; s_ed_show = tbl[s_ed_idx]; return; }
+    s_ed_idx = (s_ed_idx + dir + 5) % 5;
+    oled_set_contrast((uint8_t)((tbl[s_ed_idx] * 255) / 100)); s_ed_show = tbl[s_ed_idx];
+}
+
+static void ed_buf(int dir)
+{
+    static const int tbl[] = {1024, 2048, 4096, 8192};
+    if (dir == 0) { s_ed_idx = 1; s_ed_step = 1; s_ed_unit = "B"; s_ed_show = tbl[s_ed_idx]; return; }
+    s_ed_idx = (s_ed_idx + dir + 4) % 4;
+    serial_bridge_set_bufsize((size_t)tbl[s_ed_idx]); s_ed_show = tbl[s_ed_idx];
+}
+
+static void ed_shist(int dir)
+{
+    static const int tbl[] = {10, 30, 50, 100};
+    if (dir == 0) { s_ed_idx = 2; s_ed_step = 1; s_ed_unit = "rec"; s_ed_show = tbl[s_ed_idx]; return; }
+    s_ed_idx = (s_ed_idx + dir + 4) % 4;
+    spi_mon_set_history_max(tbl[s_ed_idx]); s_ed_show = tbl[s_ed_idx];
+}
+
+static void ed_ihist(int dir)
+{
+    static const int tbl[] = {10, 30, 50, 100};
+    if (dir == 0) { s_ed_idx = 2; s_ed_step = 1; s_ed_unit = "rec"; s_ed_show = tbl[s_ed_idx]; return; }
+    s_ed_idx = (s_ed_idx + dir + 4) % 4;
+    i2c_mon_set_history_max(tbl[s_ed_idx]); s_ed_show = tbl[s_ed_idx];
+}
+
+static void ed_rhist(int dir)
+{
+    static const int tbl[] = {10, 30, 50, 100};
+    if (dir == 0) { s_ed_idx = 2; s_ed_step = 1; s_ed_unit = "ln"; s_ed_show = tbl[s_ed_idx]; return; }
+    s_ed_idx = (s_ed_idx + dir + 4) % 4;
+    menu_set_rx_hist_max(tbl[s_ed_idx]); s_ed_show = tbl[s_ed_idx];
+}
+
+static const char *const sys_items[] = {
+    "Back", "UART Baud", "Brightness", "UART Buffer", "SPI Depth", "I2C Depth", "RX Lines", "WiFi: AP Mode",
+};
+static void sys_dispatch(int sel);
+
+/* The System menu is a list whose first six entries are value editors. */
+static void sys_edit(int dir)
+{
+    switch (s_cursor) {
+    case 1: ed_baud(dir);   break;
+    case 2: ed_bright(dir); break;
+    case 3: ed_buf(dir);    break;
+    case 4: ed_shist(dir);  break;
+    case 5: ed_ihist(dir);  break;
+    case 6: ed_rhist(dir);  break;
+    default: break;
+    }
+}
+
+static void sys_dispatch(int sel)
+{
+    if (sel == 7) {
+        wifi_manager_start_ap();
+        oled_clear();
+        row_text(ROW_ITEM_Y, "WiFi AP mode", false);
+        row_text(ROW_ITEM_Y + 16, "started", false);
+        oled_flush();
+        vTaskDelay(pdMS_TO_TICKS(1200));
+    }
+}
+
+/* ---- Info ---- */
+static const char *const info_items[] = {
+    "Back", "Device Status", "Network", "Firmware", "USB Role", "AI / MCP",
+};
+static void info_dispatch(int sel)
+{
+    switch (sel) {
+    case 1: open_info(MENU_STATUS);    break;
+    case 2: open_info(MENU_NET);       break;
+    case 3: open_info(MENU_FIRMWARE);  break;
+    case 4: open_info(MENU_USB_STATE); break;
+    case 5: open_info(MENU_AI);        break;
+    default: break;
+    }
+}
+
+/* ---- Root ---- */
+static const char *const root_items[] = { "Monitor", "Probe", "System", "Info" };
+static void root_dispatch(int sel);
+
+static const menu_def_t menu_root = { "NexLink", root_items, 4, root_dispatch, NULL };
+static const menu_def_t menu_mon  = { "Monitor", mon_items,  7, mon_dispatch,  NULL };
+static const menu_def_t menu_prb  = { "Probe",   probe_items,7, probe_dispatch,NULL };
+static const menu_def_t menu_sys  = { "System",  sys_items,  8, sys_dispatch,  sys_edit };
+static const menu_def_t menu_inf  = { "Info",    info_items, 6, info_dispatch, NULL };
+
+/* "Back" from a nested list returns to the root. Only one level of nesting
+ * exists, so this needs no stack: the parent is always the root list. */
+static void go_back(void)
+{
+    s_menu = &menu_root;
+    s_cursor = 0;
+    s_screen = SCREEN_LIST;
+    s_page = MENU_HOME;
+}
+
+static void root_dispatch(int sel)
+{
+    switch (sel) {
+    case 0: open_menu(&menu_mon, MENU_LIST_MONITOR); break;
+    case 1: open_menu(&menu_prb, MENU_LIST_PROBE);   break;
+    case 2: open_menu(&menu_sys, MENU_LIST_SYSTEM);  break;
+    case 3: open_menu(&menu_inf, MENU_LIST_INFO);    break;
+    default: break;
+    }
+}
+
+/* The monitor/probe/info "Back" entries are handled centrally before dispatch,
+ * so nothing extra is needed here. */
+
+/* ================================================================== */
+/*  Info screens. Two detail rows + a status row, always.              */
+/* ================================================================== */
+
+static void scr_status(void)
 {
     char v[24];
-    page_header("Device Status");
+    title_row("Device Status");
 
     uint32_t s = (uint32_t)(esp_timer_get_time() / 1000000);
-    snprintf(v, sizeof(v), "%luh%02lum  baud %lu", (unsigned long)(s / 3600),
-             (unsigned long)((s / 60) % 60), (unsigned long)serial_bridge_get_baud());
-    row_kv(ROW1_Y, "Up", v);
+    snprintf(v, sizeof(v), "%luh%02lum", (unsigned long)(s / 3600), (unsigned long)((s / 60) % 60));
+    row_kv(ROW_ITEM_Y, "Up", v);
 
-    snprintf(v, sizeof(v), "%lu/%lu tcp%u", (unsigned long)serial_bridge_get_rx_count(),
-             (unsigned long)serial_bridge_get_tx_count(),
+    snprintf(v, sizeof(v), "%lu/%lu", (unsigned long)serial_bridge_get_rx_count(),
+             (unsigned long)serial_bridge_get_tx_count());
+    row_kv(ROW_ITEM_Y + 16, "RX/TX", v);
+
+    snprintf(v, sizeof(v), "%lu bps tcp%u", (unsigned long)serial_bridge_get_baud(),
              (unsigned)tcp_server_client_count());
-    row_kv(ROW2_Y, "RX/TX", v);
-
-    footer("SW2=back");
+    row_text(ROW_STATUS_Y, v, false);
 }
 
-static void screen_net(void)
+static void scr_net(void)
 {
     char ip[16] = "-", v[24], ssid[24] = "-";
     int rssi = 0;
     wifi_state_t st = wifi_manager_get_state();
     wifi_manager_get_ip_str(ip, sizeof(ip));
 
-    page_header("Network");
-    row_kv(ROW1_Y, "State", st == WIFI_STATE_CONNECTED_STA ? "STA" :
+    title_row("Network");
+    row_kv(ROW_ITEM_Y, "State", st == WIFI_STATE_CONNECTED_STA ? "STA" :
                            st == WIFI_STATE_AP_MODE        ? "AP"  : "down");
 
     if (st == WIFI_STATE_CONNECTED_STA) {
@@ -583,189 +568,171 @@ static void screen_net(void)
         }
     }
     snprintf(v, sizeof(v), "%s %ddBm", ip, rssi);
-    row_kv(ROW2_Y, "IP", v);
-
-    footer(ssid);
+    row_kv(ROW_ITEM_Y + 16, "IP", v);
+    row_text(ROW_STATUS_Y, ssid, false);
 }
 
-static void screen_firmware(void)
+static void scr_firmware(void)
 {
     char v[24];
-    page_header("Firmware");
+    title_row("Firmware");
 
     const esp_partition_t *run = esp_ota_get_running_partition();
-    row_kv(ROW1_Y, "Slot", run ? run->label : "?");
+    row_kv(ROW_ITEM_Y, "Slot", run ? run->label : "?");
 
     const char *s = "ok";
     esp_ota_img_states_t st;
     if (run && esp_ota_get_state_partition(run, &st) == ESP_OK &&
         st == ESP_OTA_IMG_PENDING_VERIFY) s = "pending";
-    snprintf(v, sizeof(v), "%s %s", s, main_boot_reason());
-    row_kv(ROW2_Y, "State", v);
-
-    footer("SW2=back");
+    snprintf(v, sizeof(v), "%s", s);
+    row_kv(ROW_ITEM_Y + 16, "State", v);
+    row_text(ROW_STATUS_Y, main_boot_reason(), false);
 }
 
-static void screen_usb(void)
+static void scr_usb(void)
 {
-    extern bool     dap_usb_is_started(void);
-    extern uint32_t dap_usb_configured_count(void);
-    extern uint32_t dap_usb_get_rx_packets(void);
-    extern uint32_t dap_usb_get_tx_packets(void);
-
     static const char *mode_s[3] = { "off", "probe", "serial" };
     char v[24], dbg[24];
-    page_header("USB Role");
+    title_row("USB Role");
 
     uint8_t m = pin_config_usb_mode();
     snprintf(v, sizeof(v), "%s cfg%u", mode_s[m <= USB_MODE_TTL ? m : 0],
              (unsigned)dap_usb_configured_count());
-    row_kv(ROW1_Y, "Role", v);
+    row_kv(ROW_ITEM_Y, "Role", v);
 
     snprintf(v, sizeof(v), "%lu/%lu", (unsigned long)dap_usb_get_rx_packets(),
              (unsigned long)dap_usb_get_tx_packets());
-    row_kv(ROW2_Y, "DAPio", v);
+    row_kv(ROW_ITEM_Y + 16, "DAPio", v);
 
     debug_pins_report(dbg, sizeof(dbg));
-    footer(debug_pins_claimed() ? dbg : "no debug IO");
+    row_text(ROW_STATUS_Y, debug_pins_claimed() ? dbg : "no debug IO", false);
 }
 
-static void screen_swd(void)
+static void scr_swd(void)
 {
     char v[24];
-    page_header("SWD / JTAG");
-
-    row_kv(ROW1_Y, "SWD", "12/13/14");
-    snprintf(v, sizeof(v), "48/38/39 swo40");
-    row_kv(ROW2_Y, "JTAG", v);
+    title_row("SWD / JTAG");
+    row_kv(ROW_ITEM_Y, "SWD", "12/13/14");
+    row_kv(ROW_ITEM_Y + 16, "JTAG", "48/38/39");
 
     if (s_swd_idcode_valid) snprintf(v, sizeof(v), "ID 0x%08lX", (unsigned long)s_swd_idcode);
     else                    snprintf(v, sizeof(v), "ID fail ack%d", s_swd_last_err);
-    footer(v);
+    row_text(ROW_STATUS_Y, v, false);
 }
 
-static void screen_pwm(void)
+static void scr_pwm(void)
 {
     char v[24];
     float f = 0.0f, d = 0.0f;
-    page_header("PWM");
+    title_row("PWM");
 
     pwm_mon_get(&f, &d);
-    snprintf(v, sizeof(v), "%.1fHz %.1f%%", (double)f, (double)d);
-    row_kv(ROW1_Y, "Input", v);
+    snprintf(v, sizeof(v), "%.1fHz", (double)f);
+    row_kv(ROW_ITEM_Y, "In F", v);
+    snprintf(v, sizeof(v), "%.1f%%", (double)d);
+    row_kv(ROW_ITEM_Y + 16, "In D", v);
 
     if (pwm_out_running()) {
         pwm_out_get(&f, &d);
-        snprintf(v, sizeof(v), "%.0fHz %.0f%%", (double)f, (double)d);
+        snprintf(v, sizeof(v), "out %.0fHz %.0f%%", (double)f, (double)d);
     } else {
-        snprintf(v, sizeof(v), "stopped");
+        snprintf(v, sizeof(v), "out stopped");
     }
-    row_kv(ROW2_Y, "Output", v);
-
-    footer("SW2=back");
+    row_text(ROW_STATUS_Y, v, false);
 }
 
-static void screen_spi(void)
+static void scr_spi(void)
 {
     char v[24], line[TEXT_COLS + 1];
-    page_header("SPI Bus");
+    title_row("SPI Bus");
 
-    snprintf(v, sizeof(v), "%lu  to%lu", (unsigned long)spi_mon_get_count(),
-             (unsigned long)spi_mon_get_timeouts());
-    row_kv(ROW1_Y, "Count", v);
-    row_kv(ROW2_Y, "State", spi_mon_running() ? "capturing" : "stopped");
+    snprintf(v, sizeof(v), "%lu", (unsigned long)spi_mon_get_count());
+    row_kv(ROW_ITEM_Y, "Count", v);
+    row_kv(ROW_ITEM_Y + 16, "State", spi_mon_running() ? "capturing" : "stopped");
 
-    /* Newest captured transaction, hex, truncated to the panel. */
     static spi_txn_t h[1];
     if (spi_mon_get_history(h, 1) == 1 && h[0].len > 0) {
         int p = 0;
         for (int i = 0; i < h[0].len && p < 12; i++)
             p += snprintf(line + p, sizeof(line) - p, "%02X", h[0].mosi[i]);
-        footer(line);
     } else {
-        footer("no transactions");
+        snprintf(line, sizeof(line), "no transactions");
     }
+    row_text(ROW_STATUS_Y, line, false);
 }
 
-static void screen_i2c(void)
+static void scr_i2c(void)
 {
     char v[24], line[TEXT_COLS + 1];
-    page_header("I2C Bus");
+    title_row("I2C Bus");
 
-    snprintf(v, sizeof(v), "%lu  isr%lu", (unsigned long)i2c_mon_get_count(),
-             (unsigned long)i2c_mon_get_isr_count());
-    row_kv(ROW1_Y, "Count", v);
-    row_kv(ROW2_Y, "Mode", i2c_mon_mode() == I2C_MON_SLAVE ? "slave" : "passive");
+    snprintf(v, sizeof(v), "%lu", (unsigned long)i2c_mon_get_count());
+    row_kv(ROW_ITEM_Y, "Count", v);
+    row_kv(ROW_ITEM_Y + 16, "Mode", i2c_mon_mode() == I2C_MON_SLAVE ? "slave" : "passive");
 
     i2c_txn_t h[1];
     if (i2c_mon_get_history(h, 1) == 1) {
-        snprintf(line, sizeof(line), "a%02X %s len%d", h[0].addr,
-                 h[0].read ? "R" : "W", h[0].len);
-        footer(line);
+        snprintf(line, sizeof(line), "a%02X %s len%d", h[0].addr, h[0].read ? "R" : "W", h[0].len);
     } else {
-        footer("no transactions");
+        snprintf(line, sizeof(line), "no transactions");
     }
+    row_text(ROW_STATUS_Y, line, false);
 }
 
-static void screen_capture(void)
+static void scr_capture(void)
 {
     char v[24];
-    page_header("Capture Log");
+    title_row("Capture Log");
 
-    snprintf(v, sizeof(v), "%u/%u", (unsigned)capture_count(),
-             (unsigned)capture_capacity());
-    row_kv(ROW1_Y, "Chunks", v);
+    snprintf(v, sizeof(v), "%u/%u", (unsigned)capture_count(), (unsigned)capture_capacity());
+    row_kv(ROW_ITEM_Y, "Chunks", v);
 
     snprintf(v, sizeof(v), "%lu..%lu", (unsigned long)capture_oldest_seq(),
              (unsigned long)capture_next_seq());
-    row_kv(ROW2_Y, "Seq", v);
+    row_kv(ROW_ITEM_Y + 16, "Seq", v);
 
     snprintf(v, sizeof(v), "%s %uB", capture_dropped() ? "WRAPPED" : "ok",
              (unsigned)capture_bytes());
-    footer(v);
+    row_text(ROW_STATUS_Y, v, false);
 }
 
-static void screen_ai(void)
+static void scr_ai(void)
 {
     char ip[16] = "-";
-    page_header("AI / MCP");
+    title_row("AI / MCP");
 
     wifi_state_t st = wifi_manager_get_state();
     bool net = (st == WIFI_STATE_CONNECTED_STA || st == WIFI_STATE_AP_MODE);
     wifi_manager_get_ip_str(ip, sizeof(ip));
 
-    row_kv(ROW1_Y, "MCP", net ? "ready" : "no net");
-    row_kv(ROW2_Y, "Tools", "24 over HTTP");
-    footer(ip);
+    row_kv(ROW_ITEM_Y, "MCP", net ? "ready" : "no net");
+    row_kv(ROW_ITEM_Y + 16, "Tools", "24");
+    row_text(ROW_STATUS_Y, ip, false);
 }
 
-/* Live serial monitor: the only screen with a scrollable body. Uses all three
- * content rows, so its hint replaces the third row when scrolling. */
-static void screen_rx(void)
+/* Live serial monitor: three scrolling rows map to the item rows; the status
+ * row shows the mode and the scroll offset. */
+static void scr_rx(void)
 {
-    page_header("RX Monitor");
+    title_row("RX Monitor");
 
     int n = s_rx_line_n;
     if (n > s_rx_hist_max) n = s_rx_hist_max;
 
-    /* s_scroll counts lines back from the newest (0 = newest visible). */
-    int start = n - BODY_ROWS - s_scroll;
+    int start = n - ITEM_ROWS - s_rx_scroll;
     if (start < 0) start = 0;
 
-    for (int row = 0; row < BODY_ROWS; row++) {
+    for (int row = 0; row < ITEM_ROWS; row++) {
         int idx = start + row;
-        if (idx >= n - s_scroll) break;
+        if (idx >= n - s_rx_scroll) { row_clear(ROW_ITEM_Y + row * 16); continue; }
         int ring = ((s_rx_line_w - (n - 1) + idx) % s_rx_hist_max + s_rx_hist_max) % s_rx_hist_max;
-        char line[TEXT_COLS + 1];
-        snprintf(line, sizeof(line), "%-*.*s", TEXT_COLS, TEXT_COLS, s_rx_lines[ring]);
-        oled_text(0, ROW1_Y + row * 16, line, false);
+        row_text(ROW_ITEM_Y + row * 16, s_rx_lines[ring], false);
     }
 
     char hint[TEXT_COLS + 1];
-    if (s_scroll) snprintf(hint, sizeof(hint), "SCR%d  SW2=back", s_scroll);
-    else          snprintf(hint, sizeof(hint), "%s  SW2=back",
-                          s_rx_hex_mode ? "HEX" : "TXT");
-    footer(hint);
+    if (s_rx_scroll) snprintf(hint, sizeof(hint), "SCR%d  SW2=back", s_rx_scroll);
+    else             snprintf(hint, sizeof(hint), "%s  SW2=back", s_rx_hex_mode ? "HEX" : "TXT");
+    row_text(ROW_STATUS_Y, hint, false);
 }
 
 /* ================================================================== */
@@ -774,201 +741,131 @@ static void screen_rx(void)
 
 static void render_list(void)
 {
-    const menu_list_t *l = s_stack[s_depth - 1];
-    int cur = s_cursor[s_depth - 1];
+    title_row(s_menu->title);
 
-    page_header(l->title);
-
-    /* Keep the cursor visible. */
+    /* Window that keeps the cursor visible. */
     int first = 0;
-    if (cur >= BODY_ROWS) first = cur - BODY_ROWS + 1;
+    if (s_cursor >= ITEM_ROWS) first = s_cursor - ITEM_ROWS + 1;
 
-    for (int row = 0; row < BODY_ROWS; row++) {
+    for (int row = 0; row < ITEM_ROWS; row++) {
         int idx = first + row;
-        if (idx >= l->count) break;
-        char line[20];
-        snprintf(line, sizeof(line), "%c%-*.*s", idx == cur ? '>' : ' ',
-                 TEXT_COLS - 1, TEXT_COLS - 1, l->items[idx].label);
-        oled_text(0, ROW1_Y + row * 16, line, false);
+        int y = ROW_ITEM_Y + row * 16;
+        if (idx >= s_menu->count) { row_clear(y); continue; }
+        /* Selected row is drawn as an inverted band; row_text() clears the row
+         * first so no tail of a previously longer label can survive. */
+        row_text(y, s_menu->items[idx], idx == s_cursor);
     }
 
-    /* Buffer wider than the panel on purpose: -Werror=format-truncation needs
-     * to prove the formatted text fits, and "%d/%d  SW2=ok" can be 14 columns
-     * for a 9-item list, which leaves no slack in a 17-byte buffer. footer()
-     * clips to 16 columns for display. */
+    /* Status row: the live value while an adjustable entry is highlighted,
+     * otherwise the item position. Buffers are wider than the panel so
+     * -Werror=format-truncation can prove the text fits; row_text() clips. */
     char hint[32];
-    snprintf(hint, sizeof(hint), "%d/%d  SW2=ok", cur + 1, l->count);
-    footer(hint);
-}
-
-static void render_edit(void)
-{
-    const menu_entry_t *e = s_edit;
-    char line[TEXT_COLS + 1];
-    char v[24];
-
-    page_header(e->label);
-
-    /* The ">" marker matches how a list shows its cursor, so "this is the item
-     * you are changing" reads the same everywhere. (An inverted band was tried
-     * first and is not usable here: oled_invert_rect() XORs the framebuffer, so
-     * filling black and then inverting leaves the band exactly as it was.) */
-    int idx = *e->u.val.idx;
-    snprintf(v, sizeof(v), "%d %s", e->u.val.table[idx], e->u.val.unit);
-    snprintf(line, sizeof(line), ">%-*.*s", TEXT_COLS - 1, TEXT_COLS - 1, v);
-    oled_text(0, ROW1_Y, line, false);
-
-    centered(ROW2_Y, "UP/DOWN changes it");
-    footer("SW2=confirm");
-}
-
-static void render_screen(void)
-{
-    switch (s_screen_page) {
-    case MENU_RX_MON:    screen_rx();       break;
-    case MENU_STATUS:    screen_status();   break;
-    case MENU_NET:       screen_net();      break;
-    case MENU_FIRMWARE:  screen_firmware(); break;
-    case MENU_USB_STATE: screen_usb();      break;
-    case MENU_SWD:       screen_swd();      break;
-    case MENU_PWM:       screen_pwm();      break;
-    case MENU_SPI:       screen_spi();      break;
-    case MENU_I2C:       screen_i2c();      break;
-    case MENU_CAPTURE:   screen_capture();  break;
-    case MENU_AI:        screen_ai();       break;
-    default:
-        page_header("?");
-        footer("SW2=back");
-        break;
+    if (s_menu->adjust && s_cursor >= 1) {
+        s_menu->adjust(0);              /* seed the editor from live state */
+        snprintf(hint, sizeof(hint), "%d %s", s_ed_show, s_ed_unit);
+        row_text(ROW_STATUS_Y, hint, true);
+    } else {
+        snprintf(hint, sizeof(hint), "%d/%d  SW2=ok", s_cursor + 1, s_menu->count);
+        row_text(ROW_STATUS_Y, hint, false);
     }
+}
+
+static void render_info(void)
+{
+    switch (s_page) {
+    case MENU_RX_MON:    scr_rx();       break;
+    case MENU_STATUS:    scr_status();   break;
+    case MENU_NET:       scr_net();      break;
+    case MENU_FIRMWARE:  scr_firmware(); break;
+    case MENU_USB_STATE: scr_usb();      break;
+    case MENU_SWD:       scr_swd();      break;
+    case MENU_PWM:       scr_pwm();      break;
+    case MENU_SPI:       scr_spi();      break;
+    case MENU_I2C:       scr_i2c();      break;
+    case MENU_CAPTURE:   scr_capture();  break;
+    case MENU_AI:        scr_ai();       break;
+    default:             title_row("?"); row_text(ROW_STATUS_Y, "SW2=back", false); break;
+    }
+}
+
+void menu_render(void)
+{
+    /* Only the UI task reaches here: the panel has a single writer. */
+    if (s_screen == SCREEN_INFO) render_info();
+    else                         render_list();
+    oled_flush();
 }
 
 /* ================================================================== */
 /*  Input                                                              */
 /* ================================================================== */
 
-static void nav_vertical(int dir)
+/* One body for both directions; the two key handlers are thin wrappers. */
+static void move(int dir);
+
+void menu_on_sw1_press(void) { move(-1); }
+void menu_on_sw3_press(void) { move(+1); }
+
+static void move(int dir)
 {
-    /* Editing: change the value. */
-    if (edit_active()) {
-        const menu_entry_t *e = s_edit;
-        s_edit_ts = now_s();
-        int n = e->u.val.count;
-        int idx = ((int)*e->u.val.idx + dir + n) % n;
-        *e->u.val.idx = (int8_t)idx;
-        if (e->u.val.apply) e->u.val.apply(e->u.val.table[idx]);
+    if (s_screen == SCREEN_INFO) {
+        /* Only the RX monitor scrolls; elsewhere SW1/SW3 are inert rather than
+         * silently meaning something else. */
+        if (s_page == MENU_RX_MON) {
+            int max = s_rx_line_n - ITEM_ROWS;
+            if (max < 0) max = 0;
+            s_rx_scroll += dir;
+            if (s_rx_scroll > max) s_rx_scroll = max;
+            if (s_rx_scroll < 0) s_rx_scroll = 0;
+        }
         ui_kick();
         return;
     }
 
-    /* On a screen only the RX monitor has anything to scroll. */
-    if (s_view == VIEW_SCREEN) {
-        if (s_screen_page == MENU_RX_MON) {
-            int max = s_rx_line_n - BODY_ROWS;
-            if (max < 0) max = 0;
-            s_scroll += dir;
-            if (s_scroll > max) s_scroll = max;
-            if (s_scroll < 0) s_scroll = 0;
-            ui_kick();
-        }
+    /* Adjustable entry highlighted: SW1/SW3 change the value. */
+    if (s_menu->adjust && s_cursor >= 1) {
+        s_menu->adjust(dir);
+        ui_kick();
         return;
     }
 
-    /* In a list: move the cursor. */
-    const menu_list_t *l = s_stack[s_depth - 1];
-    int cur = ((s_cursor[s_depth - 1] + dir) % l->count + l->count) % l->count;
-    s_cursor[s_depth - 1] = cur;
-    s_selected = cur;
+    s_cursor = ((s_cursor + dir) % s_menu->count + s_menu->count) % s_menu->count;
     ui_kick();
 }
 
-void menu_on_sw1_press(void) { nav_vertical(-1); }
-void menu_on_sw3_press(void) { nav_vertical(+1); }
-
 void menu_on_sw2_press(void)
 {
-    /* 1. Editing: confirm. A value entry lives in a list, so returning to
-     * VIEW_LIST redraws that list with the new value in place. */
-    if (edit_active()) {
-        s_view = VIEW_LIST;
-        s_edit = NULL;
+    if (s_screen == SCREEN_INFO) {
+        /* Back to the list it was opened from. s_page must follow, or
+         * /api/status keeps reporting the screen we just left (the menu_*
+         * table is the authority on which list is up, not s_page). */
+        s_screen = SCREEN_LIST;
+        if      (s_menu == &menu_mon) s_page = MENU_LIST_MONITOR;
+        else if (s_menu == &menu_prb) s_page = MENU_LIST_PROBE;
+        else if (s_menu == &menu_sys) s_page = MENU_LIST_SYSTEM;
+        else if (s_menu == &menu_inf) s_page = MENU_LIST_INFO;
+        else                          s_page = MENU_HOME;
         ui_kick();
         return;
     }
 
-    /* 2. A read-only screen: back to the list it was opened from. */
-    if (s_view == VIEW_SCREEN) {
-        s_view = VIEW_LIST;
-        s_scroll = 0;
+    const int sel = s_cursor;
+
+    /* "Back" is item 0 of every nested list - an ordinary selection, which is
+     * why no navigation stack is needed. The root list has no Back entry. */
+    if (s_menu != &menu_root && sel == 0) {
+        go_back();
         ui_kick();
         return;
     }
 
-    /* 3. In a list.
-     *
-     * At the ROOT, SW2 activates the highlighted entry. Inside a GROUP, SW2
-     * goes back up one level - without that the tree would be enter-only and
-     * the long-press escape would be the only way home.
-     *
-     * These two must not be swapped: an earlier revision checked
-     * "s_depth > 1" first, which made every second-level press "back", so no
-     * entry inside a group could ever be activated. */
-    if (s_depth > 1) {
-        s_depth--;
-        s_selected = s_cursor[s_depth - 1];
-        ui_kick();
-        return;
-    }
-
-    const menu_list_t *l = s_stack[s_depth - 1];
-    const menu_entry_t *e = &l->items[s_cursor[s_depth - 1]];
-
-    switch (e->kind) {
-    case ENTRY_LIST:
-        if (s_depth < STACK_MAX) {
-            s_stack[s_depth]  = e->u.list;
-            s_cursor[s_depth] = 0;
-            s_depth++;
-            s_selected = 0;
-        }
-        break;
-
-    case ENTRY_SCREEN:
-        s_screen_page = e->u.page;
-        s_scroll = 0;
-        s_view = VIEW_SCREEN;
-        /* The cursor belongs to a list; a screen has none. Leaving the list's
-         * index in s_selected made /api/status report a meaningless "sel"
-         * while a screen was up. */
-        s_selected = 0;
-        break;
-
-    case ENTRY_ACTION:
-        if (e->u.fn) e->u.fn();
-        break;
-
-    case ENTRY_VALUE:
-        s_edit = e;
-        s_edit_ts = now_s();
-        s_view = VIEW_EDIT;
-        break;
-    }
-
-    if (s_view == VIEW_LIST) s_selected = s_cursor[s_depth - 1];
-    else if (s_view == VIEW_SCREEN) s_selected = 0;
+    if (s_menu->dispatch) s_menu->dispatch(sel);
     ui_kick();
 }
 
 void menu_on_sw2_long_press(void)
 {
-    /* Universal escape: drop the whole stack, cancel any edit or scroll. This
-     * is the one gesture that can never be ambiguous. */
-    s_depth = 1;
-    s_cursor[0] = 0;
-    s_selected = 0;
-    s_view = VIEW_LIST;
-    s_scroll = 0;
-    s_edit = NULL;
+    go_back();                        /* universal escape, from anywhere */
     ui_kick();
 }
 
@@ -976,92 +873,63 @@ void menu_simulate_button(int btn_id, const char *action)
 {
     bool is_long = action && (strcmp(action, "long") == 0 ||
                               strcmp(action, "hold") == 0);
-    if (btn_id == 2) {
+    switch (btn_id) {
+    case 1: menu_on_sw1_press(); break;      /* SW1 = up     */
+    case 3: menu_on_sw3_press(); break;      /* SW3 = down   */
+    case 2:                                  /* SW2 = select */
         if (is_long) menu_on_sw2_long_press();
         else         menu_on_sw2_press();
-    } else if (btn_id == 1) {
-        menu_on_sw1_press();
-    } else if (btn_id == 3) {
-        menu_on_sw3_press();
+        break;
+    default: break;
     }
 }
 
 /* ================================================================== */
-/*  Task plumbing                                                      */
+/*  Introspection                                                      */
+/* ================================================================== */
+
+int menu_get_current_page(void)
+{
+    /* A single source of truth: the list table that is up, or the screen id
+     * while an info screen is displayed. s_page is kept in step with both, and
+     * this fallback keeps the reported id honest if they ever drift. */
+    if (s_screen == SCREEN_INFO) return s_page;
+    if (s_menu == &menu_mon) return MENU_LIST_MONITOR;
+    if (s_menu == &menu_prb) return MENU_LIST_PROBE;
+    if (s_menu == &menu_sys) return MENU_LIST_SYSTEM;
+    if (s_menu == &menu_inf) return MENU_LIST_INFO;
+    return MENU_HOME;
+}
+
+int menu_get_selected(void) { return s_cursor; }
+
+void menu_get_state(char *buf, unsigned len)
+{
+    if (!buf || !len) return;
+    const char *view = (s_screen == SCREEN_INFO) ? "INFO" : "LIST";
+    snprintf(buf, len, "%s %s sel=%d", view, s_menu ? s_menu->title : "?", s_cursor);
+}
+
+/* ================================================================== */
+/*  Init and task plumbing                                             */
 /* ================================================================== */
 
 void menu_init(void)
 {
-    s_depth = 1;
-    s_stack[0] = &list_root;
-    s_cursor[0] = 0;
-    s_selected = 0;
-    s_view = VIEW_LIST;
-    s_scroll = 0;
-    s_screen_page = MENU_HOME;
-    s_edit = NULL;
-    s_anim_pending = false;
-
-    /* Seed the editors from live state, so the first visit shows the truth
-     * instead of a hard-coded default. */
-    uint32_t b = 0;
-    uart_get_baudrate(UART1_PORT_NUM, &b);
-    s_baud_idx = 1;
-    for (int i = 0; i < N_BAUD; i++)
-        if ((uint32_t)val_bauds[i] == b) s_baud_idx = (int8_t)i;
-    s_bright_idx = 4;
-    s_buf_idx    = 1;
-    s_shist_idx  = 2;
-    s_ihist_idx  = 2;
-    s_rhist_idx  = 2;
+    s_menu = &menu_root;
+    s_cursor = 0;
+    s_screen = SCREEN_LIST;
+    s_page = MENU_HOME;
+    s_rx_scroll = 0;
 
     menu_clear_rx();
-    if (!s_kick)     s_kick     = xSemaphoreCreateBinary();
-    if (!s_nav_lock) s_nav_lock = xSemaphoreCreateMutex();
+    if (!s_kick) s_kick = xSemaphoreCreateBinary();
 
-    ESP_LOGI(TAG, "menu ready: 4 groups, SW1/SW3=up/down, SW2=enter/back");
+    ESP_LOGI(TAG, "menu ready: table-driven, SW1/SW3=up/down, SW2=select");
 }
 
 void menu_ui_wait(int ms)
 {
     if (!s_kick) { vTaskDelay(pdMS_TO_TICKS(ms)); return; }
     xSemaphoreTake(s_kick, pdMS_TO_TICKS(ms));
-}
-
-void menu_render(void)
-{
-    /* Only the UI task reaches here, so the panel has a single writer. */
-    switch (s_view) {
-    case VIEW_EDIT:   render_edit();   break;
-    case VIEW_SCREEN: render_screen(); break;
-    case VIEW_LIST:
-    default:          render_list();   break;
-    }
-    oled_flush();
-}
-
-int menu_get_current_page(void)
-{
-    if (s_view == VIEW_SCREEN) return s_screen_page;
-    if (s_depth <= 1) return MENU_HOME;
-    if (s_stack[1] == &list_probe)  return MENU_LIST_PROBE;
-    if (s_stack[1] == &list_system) return MENU_LIST_SYSTEM;
-    if (s_stack[1] == &list_info)   return MENU_LIST_INFO;
-    return MENU_LIST_MONITOR;
-}
-
-int menu_get_selected(void) { return s_selected; }
-
-void menu_get_state(char *buf, unsigned len)
-{
-    if (!buf || !len) return;
-
-    const char *view = (s_view == VIEW_EDIT)   ? "EDIT"   :
-                       (s_view == VIEW_SCREEN) ? "SCREEN" : "LIST";
-    const char *where;
-    if (s_view == VIEW_SCREEN)      where = "screen";
-    else if (s_view == VIEW_EDIT)   where = s_edit ? s_edit->label : "?";
-    else                            where = s_stack[s_depth - 1]->title;
-
-    snprintf(buf, len, "%s %s d%d sel=%d", view, where, s_depth, s_selected);
 }
