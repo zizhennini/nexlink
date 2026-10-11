@@ -18,3 +18,6 @@ __pycache__/
 
 # 旧上游 git 历史的本地备份（仅本机保留，不入库）
 .git-backup-upstream.zip
+
+# artifact 预览缓存（tools 自检产物）
+.preview/

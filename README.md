@@ -68,36 +68,48 @@ SPI/I2C/PWM 协议分析仪、以及让 AI 直接操控硬件的 MCP 接口。
 | **JTAG** | DAPLink 内核原生支持（`main/dap/JTAG_DP.c`），覆盖 RISC-V / FPGA / 菊花链 |
 | **SWO / ITM** | 单线跟踪，目标的 `printf` 经 UART 模式接收（4 KB 环形缓冲，最高 4 Mbaud） |
 
-### 🖥️ OLED 菜单（SSD1306 128×64，I2C）
+### 🖥️ OLED 界面（SSD1306 128×64，I2C）
 
-```
-NexLink
-├── Monitor   RX Monitor · I2C Bus · SPI Bus · PWM · Capture Log · Clear RX/Capture
-├── Probe     SWD/JTAG · Read IDCODE · Reset Target · USB: off/probe/serial
-├── System    UART Baud · Brightness · UART Buffer · SPI/I2C Depth · RX Lines · WiFi AP
-└── Info      Device Status · Network · Firmware · USB Role · AI/MCP
-```
+开机先播放 **NexLink 开机动画**（2 倍大字逐字打出 + 进度条，约 1.4 秒），随后进入
+**6 屏直翻界面**，SW1/SW3 上下翻页、SW2 执行当前动作：
 
-**按键只有一个含义，没有例外：**
+| 屏 | 内容 | SW2 动作 |
+|----|------|----------|
+| STATUS | WiFi 状态 / 信号条 / IP | 重连 WiFi |
+| UART | 串口收发计数 + 最近数据 | 切换 HEX / 文本显示 |
+| SWD | 引脚映射 + IDCODE | 读取 IDCODE |
+| TARGET | NRST 引脚 + IDCODE | 复位目标 |
+| PWM | 测量频率 / 占空比 | 输出 1 kHz / 停止输出 |
+| USB | 当前角色（DAP / TTL / OFF） | 切换角色（自动重启） |
 
-| 按键 | 作用 |
-|---|---|
-| SW1 | 上 |
-| SW3 | 下 |
-| SW2 | 选择 |
-| SW2 长按 | 从任意位置回主页 |
-
-- 每个子列表的**第一项就是 `Back`**——返回是一个可见选项，不是隐藏模式
-- 可调项（波特率/亮度/缓冲/深度）用 SW1/SW3 直接改值，底部状态行反色显示当前值
-- RX 监视屏用 SW1/SW3 回看历史；其他只读屏上这两个键**不做别的含义**
-- 选中项是**反色高亮条**，每次绘制前先清该行背景（否则上一行更长的文本会留下残影）
-- 布局固定 4 行：y=0 标题、y=16/32 内容、y=48 状态行；字体单元 16px，画到 y>48 会被裁掉
+- **底部动作条**：每屏底部一条**亮底黑字的高亮条**，直接写明按下 SW2 会做什么
+  （如 `> 复位目标`、`> 读取 IDCODE`），不需要记按键语义；执行后临时变成结果提示
+- **专业名称**：屏标题全英文（STATUS/UART/SWD/TARGET/PWM/USB），USB 角色用
+  **DAP / TTL / OFF**，SWD 引脚压成一行（如 `SWD CLK48 DIO47`）给 IDCODE 腾出常显位置
+- 布局固定：标题行 + 2 行数据 + 底部动作条（y=48–63）；英文 8×16 点阵、中文 16×16 点阵
+- 界面实现见 [`main/display/dash_ui.c`](main/display/dash_ui.c)；中文字库由
+  [`tools/gen_cjk_font.ps1`](tools/gen_cjk_font.ps1) 自动生成（[`main/display/cjk_font.h`](main/display/cjk_font.h)，64 字）
 - **无面板也能用**：OLED 初始化失败仅告警，所有功能仍可通过网络访问
 
-> 这套结构（静态选项表 + 回调、`Back` 作为普通选项、无导航状态机）照搬自成熟固件的
-> 做法（主要是 Meshtastic 的 `MenuHandler`/`SharedUIDisplay`），而不是自创：
-> 早期版本用了一套 `stack`/`depth`/`cursor`/`view` 全局状态机，四者必须互相一致，
-> 实际出现的每个菜单 bug 都来自其中两者不一致。
+> OLED 界面在 `tools/oled_sim.html` 里有**一比一模拟器**（含开机动画实时预览），
+> 改 UI 先过模拟器再烧录，浏览器直接打开即可核对。
+
+### 🖥️ Web 界面
+
+`http://<IP>/` 返回一个**内嵌固件的单页应用**（`new_index.html`，约 46 KB，纯静态零依赖），
+含 4 个标签页：
+
+| 页 | 功能 |
+|----|------|
+| 串口 | 终端收发（HEX/时间戳）、波特率切换、发送换行控制 |
+| 状态 | WiFi/运行/USB 三组状态、**OLED 远程预览 + 远程按键**、固件分区/OTA |
+| 总线 | PWM 测量/输出（波形）、SPI 抓包/发送（事务日志+波形）、I2C 抓包/收发 |
+| 系统 | USB 角色切换、DUT 复位/下载模式、WiFi 配网扫描、OTA 上传（带进度） |
+
+- **品牌视觉**：NexLink 渐变字标 + 无线 Logo 头部、青色科技风深色主题、药丸底部导航
+- 修改流程：改 `new_index.html` → `tools/restyle_web.py` 重做样式 → `python replace_html.py`
+  注入 C 数组（脚本会逐行补 `\n` 并校验，避免 `//` 行注释吞掉后续 JS）→ 编译 → OTA
+- 所有状态数据由 2 秒轮询 `/api/status` 驱动，OLED 预览由 `/api/lcd` 拉取
 
 ### 🕒 带时间戳的抓包历史
 
@@ -314,7 +326,7 @@ idf.py build
 ```
 
 产物：`build/nexlink.bin`、`build/nexlink.elf`
-（固件约 1.31 MB，单个 OTA 槽 4 MB，余量约 59%）
+（固件约 1.0 MB，单个 OTA 槽 4 MB，余量约 75%）
 
 ### 烧录
 
@@ -389,6 +401,8 @@ curl.exe -H "Expect:" -X POST --data-binary "@build\nexlink.bin" http://<IP>/api
 
 - **必须带 `-H "Expect:"`**：curl 对大 POST 默认发 `Expect: 100-continue`，
   设备的轻量 HTTP 服务器处理不了会重置连接（表现为 curl 错误 56）
+- **建议限速上传**：设备边收边擦写 flash，全速上传会在传输中途断连（exit 56），
+  用 `--limit-rate 40K` 可稳定刷完整个固件
 - 升级写入非活动分区并自动重启；用 `/api/status` 的 `slot` / `ota` / `rst` 字段确认结果
 
 ---
@@ -420,6 +434,7 @@ curl.exe -H "Expect:" -X POST --data-binary "@build\nexlink.bin" http://<IP>/api
 | GET | `/api/capacity` · POST `/api/clear` · POST `/api/cfg` | 缓冲区查询/清空/调整（`clear` 支持 `capture`） |
 | GET | `/api/ai/config` · POST `/api/ai/config` | AI/MCP 相关配置 |
 | GET | `/api/btn?b=1\|2\|3&a=press\|long` | 远程注入按键（建议间隔 ≥250 ms） |
+| GET | `/api/lcd` | **OLED 远程预览**：128×64 裸帧（1 KB 页序位图，状态页实时渲染） |
 
 ---
 
@@ -438,7 +453,7 @@ nexlink/
 │   ├── spi_mon.c/h            # SPI 从机抓包 / 主机发送
 │   ├── i2c_mon.c/h            # I2C 从机抓包 / RMT 被动嗅探
 │   ├── buttons/               # 按键驱动（去抖 / 长按，无双击延迟）
-│   ├── display/               # OLED SSD1306 + 菜单 UI + 中文字库
+│   ├── display/               # OLED SSD1306 驱动 + 6 屏直翻 UI（dash_ui）+ 自动生成中文字库
 │   ├── dap/                   # CMSIS-DAP 内核 (ARM DAPLink) + USB 传输 (dap_usb.c)
 │   ├── net/                   # TCP 3333 / HTTP 80 / WebSocket /ws / DAP 5555 / USB 诊断
 │   ├── serial/                # UART1 桥 + USB-TTL 虚拟串口
@@ -446,7 +461,9 @@ nexlink/
 │   └── wifi/                  # WiFi STA/AP 管理
 ├── managed_components/        # 托管组件（CherryUSB 内含 USB 诊断钩子）
 ├── mcp/                       # MCP Server（AI 集成）+ 一键安装脚本
-├── tools/                     # 主机侧脚本：com0com 虚拟串口桥 / WebSocket 控制台
+├── tools/                     # 主机侧脚本：OLED 模拟器 / 字库生成 / Web 注入 / 串口桥 / WS 控制台
+├── new_index.html             # ★ Web 界面源文件（内嵌固件的单页应用，重做样式用 tools/restyle_web.py）
+├── replace_html.py            # 把 new_index.html 注入 http_status.c 的 C 数组（每行补 \n，防止注释吞 JS）
 ├── partitions.csv             # 双 OTA 分区表
 ├── sdkconfig.defaults         # 默认配置（含 CherryUSB / 控制台 / I2C slave v2 / WebSocket）
 └── CMakeLists.txt
