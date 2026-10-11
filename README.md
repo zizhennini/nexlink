@@ -3,6 +3,10 @@
 **ESP32-S3 无线硬件调试器** —— 一块板子上同时具备 USB CMSIS-DAP 探针、无线串口桥、
 SPI/I2C/PWM 协议分析仪、以及让 AI 直接操控硬件的 MCP 接口。
 
+> 🎯 **项目名称**：NexLink（仓库 [`zizhennini/nexlink`](https://github.com/zizhennini/nexlink)）
+> · 🏷️ **最新固件**：👉 [**v1.0.0 · nexlink.bin**](https://github.com/zizhennini/nexlink/releases/latest)
+> · 🖥️ **Web UI**：内嵌单页应用（详见 [Web 界面](#-web-界面)）
+
 - 无线：WiFi STA/AP + TCP 串口透传 + HTTP REST + Web 状态页
 - 有线：USB-C 一键切换 **CMSIS-DAP v2 探针** / **USB-TTL 下载桥** / 关闭
 - 离线可用：OLED 菜单 + 三个物理按键，不依赖网络
@@ -220,17 +224,35 @@ python tools/ws_console.py --host <IP> --raw > log.bin # 只导出目标板数�
 
 | 排针信号 | ESP32-S3 | 用途 |
 |---------|----------|------|
-| 5V | — | USB-C 5V 直出（给目标供电或取电） |
-| 3V3 | — | LDO 输出（给目标供电） |
-| GND ×2 | — | 共地 |
-| **TXD0 / RXD0** | IO43 / IO44 | **本板控制台**（日志，115200） |
-| **TXD1 / RXD1** | IO47 / IO21 | 到目标板的串口桥（TCP 3333 / USB-TTL 走这条） |
-| **SCL / SDA** | IO10 / IO11 | I2C0，与 OLED 共用总线；可嗅探外部 I2C |
-| **NRST** | IO12 | 目标复位（`/api/dut/reset`） |
-| **SWCLK / SWDIO** | IO13 / IO14 | **CMSIS-DAP 探针**（`dap` 模式） |
-| **TDI / TDO / nTRST** | IO48 / IO38 / IO39 | **JTAG 调试**（探针独占，见下） |
-| **SWO** | IO40 | **ITM 跟踪**（目标 printf 单向输出到主机） |
-| **拓展 IO** | IO45（剩 1 个） | 协议可排列：`PWM / GPIO / SCK / MOSI / MISO / CS / SDA / SCL` |
+| 🔌 5V | — | USB-C 5V 直出（给目标供电或取电） |
+| 🔋 3V3 | — | LDO 输出（给目标供电） |
+| ⏚ GND ×2 | — | 共地 |
+| 🔊 **TXD0 / RXD0** | IO43 / IO44 | **本板控制台**（日志，115200） |
+| 🔁 **TXD1 / RXD1** | IO47 / IO21 | 到目标板的串口桥（TCP 3333 / USB-TTL 走这条） |
+| 🧮 **SCL / SDA** | IO10 / IO11 | I2C0，与 OLED 共用总线；可嗅探外部 I2C |
+| 🔘 **NRST** | IO12 | 目标复位（`/api/dut/reset`） |
+| 🪝 **SWCLK / SWDIO** | IO13 / IO14 | **CMSIS-DAP 探针**（`dap` 模式） |
+| 🧩 **TDI / TDO / nTRST** | IO48 / IO38 / IO39 | **JTAG 调试**（探针独占，见下） |
+| 📡 **SWO** | IO40 | **ITM 跟踪**（目标 printf 单向输出到主机） |
+| 🎛️ **拓展 IO** | IO45（剩 1 个） | 协议可排列：`PWM / GPIO / SCK / MOSI / MISO / CS / SDA / SCL` |
+
+> ⚠️ **接线前必读**：排针全部 3.3V、**无电平转换**——接 3.3V 目标安全，接 5V 目标
+> 必须自行加电平转换（详见 [逻辑电平警告](#-逻辑电平警告)）。
+
+### 🔌 快速接线指南
+
+按你要做的事情接线，不用看完整引脚表：
+
+| 你要做 | 接排针 | 说明 |
+|--------|--------|------|
+| 🖥️ **无线串口调试** | `TXD1→目标RX`、`RXD1←目标TX`、`GND` | 浏览器/TCP 3333 连 NexLink 即得无线串口助手 |
+| 🪝 **SWD 调试**（Keil/pyOCD/OpenOCD） | `SWCLK`、`SWDIO`、`NRST`、`GND` | 需先把 USB 角色切到 `dap`；插 USB-C 即识别为 CMSIS-DAP 探针 |
+| ⬇️ **USB-TTL 给目标烧录** | `TXD1/RXD1` 交叉、`NRST`、`BOOT/IO0`(任一 GPIO 拓展 IO)、`GND` | 角色切 `ttl`；`/api/dut/reset?boot=1` 可无线进下载模式 |
+| 🧮 **I2C 嗅探** | `SCL`、`SDA`、`GND` | Web「总线」页抓 I2C 读写事务（需先让出 SCL/SDA 协议位） |
+| 🎛️ **PWM 测量** | 任意拓展 IO（设为 `PWM` 协议）、`GND` | Web「总线」页实时看频率/占空比 |
+| 🏓 **SPI 抓包/发送** | `SCK/MOSI/MISO/CS`（拓展 IO 排列）、`GND` | 默认作从机抓包，发送时自动切主机 |
+| 🔊 **看 NexLink 日志** | `TXD0`(→USB-TTL 的 RX)、`RXD0`、`GND` | 115200 控制台，DAP/TTL 模式下原生 USB 被占用时用它 |
+| 🐦 **SWO/ITM 跟踪** | `SWO`(IO40)、`GND` | Keil 勾 Trace→SWO / pyOCD `--swo`，上限 4 Mbaud |
 
 ### JTAG 与 SWO 的引脚占用（重要）
 
@@ -314,6 +336,9 @@ Web 页、OLED Config 页或 MCP 的 `set_pins` 都能改，自动交换、拒�
 - **ESP-IDF v5.5.x**（本项目在 v5.5.5 上验证）
 - 目标芯片 **ESP32-S3-WROOM-1-N16R8**（16 MB quad flash + 8 MB octal PSRAM）
 - 首次构建会自动拉取托管组件（CherryUSB 1.4.3、cJSON）
+
+> 💾 **不想自己编译？** 直接下载现成固件：
+> 👉 [**GitHub Releases**](https://github.com/zizhennini/nexlink/releases/latest)（`nexlink.bin`，OTA 刷入即可）
 
 > ⚠️ **`sdkconfig.defaults` 改了不一定生效**：IDF 只在 `sdkconfig` 不存在时才用 defaults 生成它。
 > 改完 defaults 后必须先删除 `sdkconfig` 再构建，否则会按旧配置编译。
