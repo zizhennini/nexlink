@@ -21,3 +21,4 @@ __pycache__/
 
 # artifact 预览缓存（tools 自检产物）
 .preview/
+_shots/

@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NexLink · 无线硬件调试器</title>
+<meta name="description" content="基于 ESP32-S3 的无线嵌入式调试器：CMSIS-DAP 探针、无线串口桥、PWM/SPI/I2C 协议分析仪、OTA 升级，一个浏览器全搞定。">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect width='24' height='24' rx='5' fill='%2322d3ee'/><g fill='none' stroke='%2305303a' stroke-width='2' stroke-linecap='round'><path d='M4.5 12a10.5 10.5 0 0 1 15 0'/><path d='M7.8 15.2a6 6 0 0 1 8.4 0'/><circle cx='12' cy='18.6' r='1.5' fill='%2305303a' stroke='none'/></g></svg>">
+<style>
+/* ============================================================
+   NexLink 产品宣发页 · 与设备 Web 控制台同一套深色青蓝视觉
+   ============================================================ */
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#080c13;--bg2:#0b111b;--card:#121b27;--card2:#0e1621;--inset:#0a1019;--border:#202e42;
+  --fg:#e9eef6;--muted:#8b99ad;--faint:#5c697d;
+  --accent:#2dd4ee;--accent2:#38bdf8;--ok:#34d399;--warn:#fbbf24;--err:#fb7185;
+  --rx:#34d399;--tx:#fbbf24;
+  --maxw:1080px;
+}
+html{scroll-behavior:smooth}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  background:var(--bg);color:var(--fg);font-size:15px;line-height:1.65;
+  background-image:radial-gradient(1000px 420px at 50% -160px,rgba(34,211,238,.13),transparent 70%);
+  background-repeat:no-repeat;overflow-x:hidden;
+}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+a{color:inherit;text-decoration:none}
+img{max-width:100%}
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 22px}
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-thumb{background:#243448;border-radius:8px}
+::-webkit-scrollbar-track{background:transparent}
+
+/* ---------- 顶部导航 ---------- */
+.nav{
+  position:sticky;top:0;z-index:60;
+  background:rgba(9,13,20,.82);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border-bottom:1px solid rgba(32,46,66,.7);
+}
+.nav-in{max-width:var(--maxw);margin:0 auto;padding:11px 22px;display:flex;align-items:center;gap:14px}
+.logo{
+  width:38px;height:38px;flex:0 0 auto;border-radius:11px;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#46e6f5,#0ea5e9);
+  box-shadow:0 6px 16px rgba(34,211,238,.35),inset 0 1px 0 rgba(255,255,255,.45);
+}
+.logo svg{width:23px;height:23px}
+.brand{font-size:19px;font-weight:800;letter-spacing:2px;
+  background:linear-gradient(90deg,#cffafe,#67e8f9 45%,#38bdf8);
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+.nav-links{margin-left:auto;display:flex;gap:22px;font-size:13.5px;color:var(--muted);font-weight:600}
+.nav-links a{transition:color .15s}
+.nav-links a:hover{color:var(--accent)}
+.nav-gh{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:700;
+  padding:8px 15px;border-radius:10px;border:1px solid var(--border);
+  background:linear-gradient(180deg,#16222f,#101925);transition:filter .15s}
+.nav-gh:hover{filter:brightness(1.2)}
+.nav-gh svg{width:17px;height:17px;fill:currentColor}
+
+/* ---------- Hero ---------- */
+.hero{position:relative;padding:84px 0 64px;text-align:center}
+.hero-glow{position:absolute;top:-80px;left:50%;transform:translateX(-50%);width:560px;height:380px;
+  border-radius:50%;background:radial-gradient(circle,rgba(45,212,238,.16),transparent 65%);pointer-events:none}
+.hero h1{position:relative;font-size:clamp(44px,8vw,76px);font-weight:900;letter-spacing:6px;line-height:1.05;
+  background:linear-gradient(90deg,#eafcff,#67e8f9 42%,#38bdf8 78%,#818cf8);
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+  filter:drop-shadow(0 6px 30px rgba(45,212,238,.25))}
+.hero .slogan{position:relative;font-size:clamp(16px,2.4vw,21px);color:#b9c8da;margin-top:16px;letter-spacing:3px;font-weight:500}
+.hero .desc{position:relative;max-width:640px;margin:18px auto 0;color:var(--muted);font-size:14.5px}
+.hero-cta{position:relative;display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-top:34px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  border:1px solid var(--border);background:linear-gradient(180deg,#16222f,#101925);color:var(--fg);
+  border-radius:12px;padding:13px 26px;font-size:14.5px;font-weight:700;font-family:inherit;cursor:pointer;
+  box-shadow:0 4px 14px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.05);transition:transform .1s,filter .15s}
+.btn:hover{filter:brightness(1.15)}
+.btn:active{transform:scale(.97)}
+.btn.primary{background:linear-gradient(180deg,#39e0f3,#14b8d8);border-color:#2dd4ee;color:#042730;
+  box-shadow:0 8px 24px rgba(34,211,238,.35),inset 0 1px 0 rgba(255,255,255,.4)}
+.btn svg{width:17px;height:17px}
+.hero-chips{position:relative;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:30px}
+.chip{font-size:12.5px;font-weight:600;color:#a9bccd;padding:6px 14px;border-radius:999px;
+  background:rgba(18,27,39,.8);border:1px solid var(--border)}
+.chip b{color:var(--accent);font-weight:700}
+
+/* ---------- 通用 section ---------- */
+section{padding:62px 0}
+.sec-head{text-align:center;margin-bottom:42px}
+.sec-head .kick{font-size:12.5px;font-weight:800;letter-spacing:4px;color:var(--accent);text-transform:uppercase}
+.sec-head h2{font-size:clamp(26px,4vw,36px);font-weight:800;margin-top:10px;letter-spacing:1px}
+.sec-head p{color:var(--muted);margin-top:10px;font-size:14.5px;max-width:620px;margin-left:auto;margin-right:auto}
+
+/* ---------- 浏览器 + 控制台 mockup ---------- */
+.mock{
+  border-radius:16px;overflow:hidden;border:1px solid #1c3a47;
+  background:linear-gradient(180deg,#0d1722,#0a111a);
+  box-shadow:0 30px 80px rgba(0,0,0,.55),0 0 0 1px rgba(45,212,238,.06),inset 0 1px 0 rgba(255,255,255,.05);
+}
+.browser-bar{display:flex;align-items:center;gap:9px;padding:11px 15px;background:#0e1823;border-bottom:1px solid var(--border)}
+.dot{width:11px;height:11px;border-radius:50%}
+.dot.r{background:#fb7185}.dot.y{background:#fbbf24}.dot.g{background:#34d399}
+.urlbar{margin-left:10px;flex:1;max-width:420px;background:#070c13;border:1px solid var(--border);
+  border-radius:8px;padding:6px 13px;font-size:12px;color:#7e8ea3;display:flex;align-items:center;gap:7px}
+.urlbar svg{width:12px;height:12px;flex:0 0 auto}
+.urlbar b{color:var(--ok);font-weight:700}
+.mock-note{margin-left:auto;font-size:11.5px;color:var(--faint)}
+
+/* 控制台内部 —— 复刻真机 Web UI */
+.console{background:var(--bg);padding:0;max-height:640px;overflow:hidden;display:flex;flex-direction:column}
+.c-body{padding:14px 16px 0;overflow-y:auto;flex:1;scrollbar-width:thin}
+.c-page{display:none}.c-page.on{display:block;animation:cfade .18s ease}
+@keyframes cfade{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+.c-hero{display:flex;align-items:center;gap:12px;border-radius:14px;padding:13px 15px;margin-bottom:12px;
+  border:1px solid #1c3a47;background:linear-gradient(135deg,#0d2a34 0%,#101c29 52%,#0d151f 100%);
+  box-shadow:0 10px 26px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.05);position:relative;overflow:hidden}
+.c-hero::after{content:"";position:absolute;top:-50px;right:-20px;width:150px;height:150px;border-radius:50%;
+  background:radial-gradient(circle,rgba(45,212,238,.3),transparent 65%)}
+.c-logo{width:38px;height:38px;flex:0 0 auto;border-radius:11px;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#46e6f5,#0ea5e9);box-shadow:0 6px 14px rgba(34,211,238,.4)}
+.c-logo svg{width:23px;height:23px}
+.c-name{font-size:19px;font-weight:800;letter-spacing:2px;z-index:1;
+  background:linear-gradient(90deg,#cffafe,#67e8f9 45%,#38bdf8);-webkit-background-clip:text;background-clip:text;color:transparent}
+.c-sub{font-size:10.5px;color:#8aa0b6;letter-spacing:2px;z-index:1}
+.c-badge{margin-left:auto;z-index:1;font-size:11px;font-weight:700;padding:5px 11px;border-radius:999px;
+  color:var(--ok);background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.35);display:inline-flex;align-items:center;gap:6px}
+.c-badge::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.ccard{background:linear-gradient(180deg,#131d29,#0f1823);border:1px solid var(--border);border-radius:13px;
+  padding:13px 15px;margin-bottom:11px;box-shadow:0 6px 18px rgba(0,0,0,.25),inset 0 1px 0 rgba(255,255,255,.03)}
+.ccard h3{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700}
+.ccard h3::before{content:"";width:3px;height:14px;border-radius:2px;
+  background:linear-gradient(var(--accent),var(--accent2));box-shadow:0 0 8px rgba(45,212,238,.6)}
+.ccard .csub{font-size:11px;color:var(--faint);margin:2px 0 10px}
+.kv{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px dashed rgba(32,46,66,.8);font-size:12.5px}
+.kv:last-child{border-bottom:none}
+.kv .k{color:var(--muted);flex-shrink:0}.kv .v{text-align:right;word-break:break-all}
+.kv .v.good{color:var(--ok)}.kv .v.hot{color:var(--warn)}.kv .v.cyan{color:var(--accent)}
+.cbtn{display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border);
+  background:linear-gradient(180deg,#16222f,#101925);color:var(--fg);border-radius:9px;
+  padding:8px 14px;font-size:12.5px;font-weight:600;font-family:inherit;cursor:pointer}
+.cbtn.primary{background:linear-gradient(180deg,#39e0f3,#14b8d8);border-color:#2dd4ee;color:#042730;font-weight:700}
+.cbtn.ok{background:linear-gradient(180deg,#41dca5,#1fae82);border-color:#34d399;color:#05302a;font-weight:700}
+.crow{display:flex;gap:8px}.crow>*{flex:1}
+.cfield label{display:block;font-size:11.5px;color:var(--muted);margin-bottom:4px}
+.cfield input,.cfield select{background:var(--inset);color:var(--fg);border:1px solid var(--border);border-radius:9px;
+  padding:8px 10px;font-size:12.5px;font-family:inherit;width:100%;margin-bottom:9px}
+.seg{display:flex;gap:5px;background:var(--inset);border:1px solid var(--border);border-radius:11px;padding:4px}
+.seg button{flex:1;border:none;background:transparent;color:var(--muted);border-radius:8px;padding:8px 4px;
+  font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;line-height:1.3}
+.seg button small{display:block;font-size:9.5px;font-weight:400;opacity:.8;margin-top:2px}
+.seg button.on{background:linear-gradient(180deg,#39e0f3,#14b8d8);color:#042730;box-shadow:0 4px 10px rgba(34,211,238,.3)}
+.subtabs{display:flex;gap:5px;margin-bottom:11px;background:var(--inset);border:1px solid var(--border);border-radius:11px;padding:4px}
+.subtabs button{flex:1;border:none;background:transparent;color:var(--muted);border-radius:8px;padding:8px;
+  font-size:12.5px;font-weight:600;font-family:inherit;cursor:pointer}
+.subtabs button.on{background:#153040;color:var(--accent);box-shadow:inset 0 0 0 1px rgba(45,212,238,.25)}
+.bus-pane{display:none}.bus-pane.on{display:block}
+.term{background:#060a10;border:1px solid var(--border);border-radius:10px;padding:10px 12px;height:250px;overflow-y:auto;
+  font-size:11.5px;line-height:1.7;white-space:pre-wrap;word-break:break-all;box-shadow:inset 0 2px 10px rgba(0,0,0,.45)}
+.term .rx{color:var(--rx)}.term .tx{color:var(--tx)}.term .sy{color:var(--faint)}.term .ts{color:#46536a}
+.term-bar{display:flex;gap:7px;align-items:center;margin-bottom:8px;font-size:11.5px;color:var(--muted)}
+.term-bar select{background:var(--inset);color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:5px 8px;font-size:11.5px}
+.term-bar .sp{margin-left:auto}
+.send-row{display:flex;gap:7px;margin-top:8px}
+.send-row input{flex:1;min-width:0;background:var(--inset);color:var(--fg);border:1px solid var(--border);border-radius:9px;padding:8px 10px;font-size:12px;font-family:inherit}
+canvas.wave{width:100%;height:74px;background:#060a10;border:1px solid var(--border);border-radius:9px;margin:7px 0;display:block}
+.txn-log{background:#060a10;border:1px solid var(--border);border-radius:9px;padding:8px 11px;height:120px;overflow-y:auto;
+  font-size:11px;line-height:1.7;box-shadow:inset 0 2px 8px rgba(0,0,0,.4)}
+.txn-log .w{color:var(--ok)}.txn-log .r{color:var(--accent)}
+.progress{height:7px;background:var(--inset);border-radius:99px;overflow:hidden;margin:9px 0;border:1px solid var(--border)}
+.progress i{display:block;height:100%;width:68%;background:linear-gradient(90deg,var(--accent),var(--accent2));
+  box-shadow:0 0 10px rgba(45,212,238,.6)}
+.lcd-mini{background:#000;border-radius:9px;padding:9px;display:flex;justify-content:center;margin:4px 0 9px;
+  box-shadow:inset 0 0 0 1px #101826,0 5px 14px rgba(0,0,0,.35)}
+.lcd-mini canvas{width:100%;max-width:280px;height:auto;image-rendering:pixelated}
+.c-tabbar{display:flex;background:rgba(12,17,25,.96);border-top:1px solid var(--border);padding:7px 4px}
+.c-tabbar button{position:relative;flex:1;border:none;background:transparent;color:var(--faint);font-family:inherit;
+  font-size:11px;font-weight:600;padding:7px 0;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:3px;transition:color .15s}
+.c-tabbar button svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.c-tabbar button.on{color:var(--accent)}
+.c-tabbar button.on::before{content:"";position:absolute;top:2px;width:44px;height:28px;border-radius:999px;
+  background:rgba(45,212,238,.14);border:1px solid rgba(45,212,238,.22);z-index:-1}
+
+/* ---------- 特性 ---------- */
+.feat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.feat{background:linear-gradient(180deg,#131d29,#0f1823);border:1px solid var(--border);border-radius:15px;padding:24px 22px;
+  transition:transform .18s,border-color .18s,box-shadow .18s;position:relative;overflow:hidden}
+.feat:hover{transform:translateY(-4px);border-color:rgba(45,212,238,.45);box-shadow:0 16px 40px rgba(0,0,0,.4),0 0 24px rgba(45,212,238,.08)}
+.feat-ico{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;
+  background:rgba(45,212,238,.1);border:1px solid rgba(45,212,238,.25);margin-bottom:15px}
+.feat-ico svg{width:23px;height:23px;stroke:var(--accent);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.feat h3{font-size:16.5px;font-weight:700;margin-bottom:7px}
+.feat p{font-size:13px;color:var(--muted);line-height:1.7}
+.feat .tag{display:inline-block;margin-top:12px;font-size:11px;font-weight:700;color:var(--accent);
+  background:rgba(45,212,238,.08);border:1px solid rgba(45,212,238,.2);border-radius:6px;padding:3px 9px;font-family:ui-monospace,monospace}
+
+/* ---------- OLED ---------- */
+.oled-band{background:linear-gradient(135deg,#0d2a34,#0a121b 60%,#0d151f);border:1px solid #1c3a47;border-radius:18px;
+  padding:40px 30px;display:flex;gap:40px;align-items:center;flex-wrap:wrap;justify-content:center;
+  box-shadow:0 20px 60px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.05)}
+.oled-device{background:#0a0f16;border:1px solid #22344a;border-radius:18px;padding:22px 20px 18px;flex:0 0 auto;
+  box-shadow:0 18px 40px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.04)}
+.oled-screen{background:#000;border-radius:8px;padding:10px;box-shadow:inset 0 0 0 1px #0e1620}
+.oled-screen canvas{display:block;width:256px;height:128px;image-rendering:pixelated}
+.oled-keys{display:flex;gap:8px;margin-top:14px;justify-content:center}
+.oled-key{font-size:10.5px;font-weight:700;color:var(--muted);background:#131d29;border:1px solid var(--border);
+  border-radius:7px;padding:6px 0;flex:1;text-align:center}
+.oled-key.sel{color:#042730;background:linear-gradient(180deg,#39e0f3,#14b8d8);border-color:#2dd4ee}
+.oled-txt{flex:1;min-width:260px;max-width:480px}
+.oled-txt h3{font-size:22px;font-weight:800;margin-bottom:12px}
+.oled-txt ul{list-style:none}
+.oled-txt li{font-size:13.5px;color:var(--muted);padding:7px 0 7px 26px;position:relative;border-bottom:1px dashed rgba(32,46,66,.7)}
+.oled-txt li:last-child{border-bottom:none}
+.oled-txt li::before{content:"";position:absolute;left:2px;top:13px;width:8px;height:8px;border-radius:2px;
+  background:linear-gradient(var(--accent),var(--accent2));box-shadow:0 0 8px rgba(45,212,238,.6)}
+.oled-txt li b{color:var(--fg)}
+
+/* ---------- 引脚 ---------- */
+.pin-grid{display:grid;grid-template-columns:1.1fr .9fr;gap:22px;align-items:start}
+.table-card{background:linear-gradient(180deg,#131d29,#0f1823);border:1px solid var(--border);border-radius:15px;overflow:hidden}
+.table-card table{width:100%;border-collapse:collapse;font-size:12.8px}
+.table-card th{background:#16222f;color:#9fb2c8;text-align:left;padding:11px 14px;font-size:12px;letter-spacing:1px}
+.table-card td{padding:9px 14px;border-top:1px solid rgba(32,46,66,.7);vertical-align:top}
+.table-card td.sig{font-weight:700;white-space:nowrap}
+.table-card td.io{color:var(--accent);font-family:ui-monospace,monospace;white-space:nowrap}
+.table-card td.note{color:var(--muted)}
+.warn-box{margin-top:14px;font-size:12.5px;color:#f3d9a3;background:rgba(251,191,36,.08);
+  border:1px solid rgba(251,191,36,.3);border-radius:11px;padding:12px 15px}
+.quick{display:flex;flex-direction:column;gap:10px}
+.quick-item{background:linear-gradient(180deg,#131d29,#0f1823);border:1px solid var(--border);border-radius:13px;padding:15px 17px}
+.quick-item h4{font-size:13.5px;font-weight:700;display:flex;align-items:center;gap:8px;margin-bottom:5px}
+.quick-item h4 .n{width:22px;height:22px;flex:0 0 auto;border-radius:7px;background:rgba(45,212,238,.1);
+  border:1px solid rgba(45,212,238,.25);color:var(--accent);display:flex;align-items:center;justify-content:center;
+  font-size:11.5px;font-family:ui-monospace,monospace}
+.quick-item p{font-size:12px;color:var(--muted)}
+.quick-item code{color:var(--accent);font-family:ui-monospace,monospace;font-size:11.5px}
+
+/* ---------- 快速开始 ---------- */
+.start-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.code-card{background:linear-gradient(180deg,#131d29,#0f1823);border:1px solid var(--border);border-radius:15px;overflow:hidden}
+.code-card .ch{padding:13px 17px;border-bottom:1px solid var(--border);font-size:14px;font-weight:700;display:flex;align-items:center;gap:9px}
+.code-card .ch svg{width:17px;height:17px;stroke:var(--accent);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.code-card pre{padding:15px 17px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.3px;
+  line-height:1.75;overflow-x:auto;color:#c7d6e8}
+.code-card .cbody{padding:15px 17px;font-size:13px;color:var(--muted)}
+.code-card .cbody p{margin-bottom:9px}
+.code-card .cbody b{color:var(--fg)}
+.code-card .cbody a{color:var(--accent);font-weight:700;text-decoration:underline}
+.k{color:#7e8ea3}.s2{color:#34d399}.s3{color:#38bdf8}.s4{color:#fbbf24}
+
+/* ---------- 最终 CTA / footer ---------- */
+.final{text-align:center;padding:70px 0 30px}
+.final h2{font-size:clamp(26px,4.5vw,40px);font-weight:900;
+  background:linear-gradient(90deg,#cffafe,#67e8f9 50%,#38bdf8);-webkit-background-clip:text;background-clip:text;color:transparent}
+.final p{color:var(--muted);margin:14px 0 28px}
+footer{border-top:1px solid rgba(32,46,66,.7);padding:28px 0 40px;color:var(--faint);font-size:12.5px}
+.foot-in{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.foot-in .mr{margin-left:auto;display:flex;gap:16px}
+.foot-in a{color:var(--muted)}.foot-in a:hover{color:var(--accent)}
+.foot-in svg{width:16px;height:16px;fill:currentColor;vertical-align:-3px;margin-right:5px}
+
+/* ---------- 响应式 ---------- */
+@media (max-width:900px){
+  .feat-grid{grid-template-columns:repeat(2,1fr)}
+  .pin-grid{grid-template-columns:1fr}
+  .start-grid{grid-template-columns:1fr}
+  .nav-links{display:none}
+}
+@media (max-width:560px){
+  .feat-grid{grid-template-columns:1fr}
+  .hero{padding:56px 0 44px}
+  section{padding:46px 0}
+  .mock-note{display:none}
+  .console{max-height:560px}
+  .oled-screen canvas{width:218px;height:109px}
+}
+</style>
+</head>
+<body>
+<!-- ================= 顶部导航 ================= -->
+<nav class="nav">
+  <div class="nav-in">
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#05303a" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4.5 12a10.5 10.5 0 0 1 15 0"/><path d="M7.8 15.2a6 6 0 0 1 8.4 0"/>
+        <circle cx="12" cy="18.6" r="1.5" fill="#05303a" stroke="none"/>
+      </svg>
+    </div>
+    <span class="brand">NexLink</span>
+    <div class="nav-links">
+      <a href="#console">控制台</a>
+      <a href="#features">特性</a>
+      <a href="#oled">OLED</a>
+      <a href="#pins">引脚</a>
+      <a href="#start">快速开始</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/zizhennini/nexlink" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.55v-2.15c-3.2.7-3.87-1.36-3.87-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.23-1.28-5.23-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.8 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.69 5.38-5.25 5.67.41.36.78 1.06.78 2.14v3.17c0 .3.21.67.8.55A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<!-- ================= Hero ================= -->
+<header class="hero">
+  <div class="hero-glow"></div>
+  <div class="wrap">
+    <h1>NexLink</h1>
+    <div class="slogan">一根线都不用插的无线硬件调试器</div>
+    <p class="desc">基于 ESP32-S3，把 CMSIS-DAP 调试探针、无线串口桥、PWM / SPI / I2C 协议分析仪、OTA 升级塞进一块小板，打开浏览器就能调试你的目标板。</p>
+    <div class="hero-cta">
+      <a class="btn primary" href="https://github.com/zizhennini/nexlink/releases/tag/v1.0.0" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+        下载固件 nexlink.bin
+      </a>
+      <a class="btn" href="#console">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/><circle cx="6.5" cy="6.5" r=".5" fill="currentColor"/></svg>
+        看看 Web 控制台
+      </a>
+    </div>
+    <div class="hero-chips">
+      <span class="chip"><b>ESP32-S3</b> 双核 240MHz</span>
+      <span class="chip"><b>CMSIS-DAP v2.1</b> WinUSB 免驱</span>
+      <span class="chip"><b>WiFi</b> 串口 / 调试 / 抓包</span>
+      <span class="chip"><b>OTA</b> 双分区自动回滚</span>
+      <span class="chip"><b>MCP</b> AI 直接操硬件</span>
+    </div>
+  </div>
+</header>
+
+<!-- ================= Web 控制台实景 ================= -->
+<section id="console">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kick">Web Console</div>
+      <h2>设备自带的 Web 控制台</h2>
+      <p>不用装任何上位机。连上 NexLink 的 WiFi，浏览器打开设备地址，串口、状态、总线、系统四个页面随手切换。下面是可点击的实机界面复刻——试试底部四个标签。</p>
+    </div>
+
+    <div class="mock">
+      <div class="browser-bar">
+        <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <div class="urlbar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+          <b>https</b>://192.168.4.1/
+        </div>
+        <span class="mock-note">界面演示 · 数据为示例</span>
+      </div>
+
+      <div class="console">
+        <div class="c-body" id="cBody">
+
+          <!-- ===== 控制台页：串口 ===== -->
+          <div class="c-page on" data-cpage="serial">
+            <div class="c-hero">
+              <div class="c-logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#05303a" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4.5 12a10.5 10.5 0 0 1 15 0"/><path d="M7.8 15.2a6 6 0 0 1 8.4 0"/>
+                  <circle cx="12" cy="18.6" r="1.5" fill="#05303a" stroke="none"/>
+                </svg>
+              </div>
+              <div>
+                <div class="c-name">NexLink</div>
+                <div class="c-sub">无线硬件调试器</div>
+              </div>
+              <span class="c-badge">已连接路由器</span>
+            </div>
+            <div class="ccard">
+              <h3>串口终端</h3>
+              <div class="csub">和目标板之间收发数据，相当于无线版串口助手</div>
+              <div class="term-bar">
+                <select><option>115200</option></select>
+                <span>☑ HEX</span><span>☑ 时间</span>
+                <span class="sp"><span class="cbtn" style="padding:5px 11px">清空</span></span>
+              </div>
+              <div class="term mono" id="termDemo"></div>
+              <div class="send-row">
+                <select style="flex:0 0 auto;width:74px;background:#0a1019;color:#e9eef6;border:1px solid #202e42;border-radius:9px;padding:8px;font-size:12px"><option>LF</option></select>
+                <input placeholder="输入要发送的内容，回车发送">
+                <button class="cbtn primary" style="flex:0 0 auto;padding:8px 18px">发送</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- ===== 控制台页：状态 ===== -->
+          <div class="c-page" data-cpage="status">
+            <div class="c-hero">
+              <div class="c-logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#05303a" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4.5 12a10.5 10.5 0 0 1 15 0"/><path d="M7.8 15.2a6 6 0 0 1 8.4 0"/>
+                  <circle cx="12" cy="18.6" r="1.5" fill="#05303a" stroke="none"/>
+                </svg>
+              </div>
+              <div><div class="c-name">NexLink</div><div class="c-sub">无线硬件调试器</div></div>
+              <span class="c-badge">已连接路由器</span>
+            </div>
+            <div class="ccard">
+              <h3>无线连接</h3>
+              <div class="kv"><span class="k">状态</span><span class="v good">STA 已连接</span></div>
+              <div class="kv"><span class="k">网络名称</span><span class="v">3-407</span></div>
+              <div class="kv"><span class="k">信号强度</span><span class="v good">-47 dBm</span></div>
+              <div class="kv"><span class="k">IP 地址</span><span class="v mono cyan">192.168.4.1</span></div>
+            </div>
+            <div class="ccard">
+              <h3>运行信息</h3>
+              <div class="kv"><span class="k">已运行</span><span class="v mono">02:17:43</span></div>
+              <div class="kv"><span class="k">TCP 客户端</span><span class="v">1 个连接</span></div>
+              <div class="kv"><span class="k">串口波特率</span><span class="v mono">115200</span></div>
+              <div class="kv"><span class="k">串口接收 RX</span><span class="v mono good">48,213 B</span></div>
+              <div class="kv"><span class="k">串口发送 TX</span><span class="v mono hot">1,076 B</span></div>
+            </div>
+            <div class="ccard">
+              <h3>OLED 屏幕远程预览</h3>
+              <div class="csub">实时显示板子屏幕内容，也可以远程按实体键</div>
+              <div class="lcd-mini"><canvas id="lcdCvMini" width="128" height="64"></canvas></div>
+              <div class="crow">
+                <button class="cbtn">SW1 上</button>
+                <button class="cbtn primary">SW2 选择</button>
+                <button class="cbtn">SW3 下</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- ===== 控制台页：总线 ===== -->
+          <div class="c-page" data-cpage="bus">
+            <div class="ccard">
+              <div class="subtabs" id="busTabs">
+                <button class="on" data-bus="pwm">PWM</button>
+                <button data-bus="spi">SPI</button>
+                <button data-bus="i2c">I2C</button>
+              </div>
+              <div class="bus-pane on" data-buspane="pwm">
+                <h3>PWM 测量 / 输出</h3>
+                <div class="csub">测量引脚上信号的频率和占空比，也可以让板子自己输出一路 PWM</div>
+                <div class="kv"><span class="k">测量频率</span><span class="v mono good">1000.2 Hz</span></div>
+                <div class="kv"><span class="k">测量占空比</span><span class="v mono cyan">49.8 %</span></div>
+                <canvas class="wave" id="pwmWave" width="600" height="80"></canvas>
+                <div class="cfield"><label>输出频率 (Hz)</label><input value="1000"></div>
+                <div class="cfield"><label>输出占空比 (%)</label><input value="50"></div>
+                <div class="crow"><button class="cbtn ok">开始输出</button><button class="cbtn">停止输出</button></div>
+              </div>
+              <div class="bus-pane" data-buspane="spi">
+                <h3>SPI 抓包 / 发送</h3>
+                <div class="csub">默认作从机抓总线上的数据；点「发送」时自动切为主机主动读写</div>
+                <div class="kv"><span class="k">抓包状态</span><span class="v good">监听中 · 12 笔事务</span></div>
+                <div class="txn-log mono" id="spiLog"></div>
+                <canvas class="wave" id="spiWave" width="600" height="80"></canvas>
+                <div class="cfield"><label>发送数据（HEX，如 AA 55 01）</label><input placeholder="AA5501"></div>
+                <div class="crow">
+                  <select style="background:#0a1019;color:#e9eef6;border:1px solid #202e42;border-radius:9px;padding:8px;font-size:12px"><option>Mode 0</option></select>
+                  <select style="background:#0a1019;color:#e9eef6;border:1px solid #202e42;border-radius:9px;padding:8px;font-size:12px"><option>500 kHz</option></select>
+                </div>
+                <button class="cbtn primary" style="width:100%;margin-top:9px">发送并读取 MISO</button>
+              </div>
+              <div class="bus-pane" data-buspane="i2c">
+                <h3>I2C 抓包 / 收发</h3>
+                <div class="csub">抓取 I2C 总线上的读写事务，也可以作为主机主动读写从机</div>
+                <div class="kv"><span class="k">抓包状态</span><span class="v good">监听中 · 7 笔事务</span></div>
+                <div class="txn-log mono" id="i2cLog"></div>
+                <div class="cfield"><label>从机地址（十六进制，如 50 表示 0x50）</label><input placeholder="50"></div>
+                <div class="cfield"><label>数据（HEX，写操作时使用）</label><input placeholder="00 01 02"></div>
+                <div class="crow">
+                  <select style="background:#0a1019;color:#e9eef6;border:1px solid #202e42;border-radius:9px;padding:8px;font-size:12px"><option>写 W</option><option>读 R</option><option>写后读 WR</option></select>
+                  <input type="number" value="1" min="1" placeholder="读取字节数" style="background:#0a1019;color:#e9eef6;border:1px solid #202e42;border-radius:9px;padding:8px;font-size:12px">
+                </div>
+                <button class="cbtn primary" style="width:100%;margin-top:9px">执行</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- ===== 控制台页：系统 ===== -->
+          <div class="c-page" data-cpage="system">
+            <div class="ccard">
+              <h3>USB-C 角色切换</h3>
+              <div class="csub">一个 USB 口同一时间只能做一件事，选择会被保存</div>
+              <div class="seg" id="usbSeg">
+                <button data-m="off">关闭<small>给本板刷固件</small></button>
+                <button class="on" data-m="dap">CMSIS-DAP<small>Keil/pyOCD 调试</small></button>
+                <button data-m="ttl">USB-TTL<small>给目标板下载</small></button>
+              </div>
+            </div>
+            <div class="ccard">
+              <h3>目标板控制</h3>
+              <div class="csub">通过排针上的 NRST（IO12）控制目标板复位</div>
+              <div class="crow">
+                <button class="cbtn">复位目标板</button>
+                <button class="cbtn ok">复位并进入下载模式</button>
+              </div>
+            </div>
+            <div class="ccard">
+              <h3>WiFi 配网</h3>
+              <div class="csub">让 NexLink 连接到你的 WiFi 路由器</div>
+              <button class="cbtn" style="width:100%;margin-bottom:9px">扫描附近 WiFi</button>
+              <div class="cfield"><label>WiFi 名称 SSID</label><input value="3-407"></div>
+              <div class="cfield"><label>WiFi 密码</label><input type="password" value="********"></div>
+              <button class="cbtn primary" style="width:100%">连接</button>
+            </div>
+            <div class="ccard">
+              <h3>固件无线升级（OTA）</h3>
+              <div class="csub">选择新的 nexlink.bin，上传后自动重启；刷坏会自动回滚</div>
+              <input type="text" value="nexlink.bin" readonly style="background:#0a1019;color:#8b99ad;border:1px solid #202e42;border-radius:9px;padding:8px 10px;font-size:12px;width:100%;margin-bottom:4px;font-family:inherit">
+              <div class="progress"><i></i></div>
+              <button class="cbtn primary" style="width:100%">刷入固件 · 68%</button>
+            </div>
+          </div>
+
+        </div>
+        <nav class="c-tabbar" id="cTabbar">
+          <button class="on" data-cpage="serial">
+            <svg viewBox="0 0 24 24"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg>串口
+          </button>
+          <button data-cpage="status">
+            <svg viewBox="0 0 24 24"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg>状态
+          </button>
+          <button data-cpage="bus">
+            <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M17.5 14v7M14 17.5h7"/></svg>总线
+          </button>
+          <button data-cpage="system">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9c.2.47.64.8 1.15 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.51 1z"/></svg>系统
+          </button>
+        </nav>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 特性 ================= -->
+<section id="features" style="background:linear-gradient(180deg,transparent,rgba(14,22,33,.5) 30%,transparent)">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kick">Features</div>
+      <h2>一块板，顶替你桌上一堆工具</h2>
+      <p>探针、串口助手、逻辑分析仪、下载器、显示屏——NexLink 全给你收进 WiFi 里。</p>
+    </div>
+    <div class="feat-grid">
+      <div class="feat">
+        <div class="feat-ico"><svg viewBox="0 0 24 24"><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><circle cx="12" cy="12" r="4"/><path d="M5 5l2.5 2.5M16.5 16.5L19 19M19 5l-2.5 2.5M7.5 16.5L5 19"/></svg></div>
+        <h3>CMSIS-DAP 无线探针</h3>
+        <p>DAPLink 内核原生支持，USB 插上即被 Keil / pyOCD / OpenOCD 识别为 CMSIS-DAP v2.1 探针；SWD 命令经 WiFi 转发，隔着房间也能下断点。</p>
+        <span class="tag">SWD · JTAG · SWO/ITM</span>
+      </div>
+      <div class="feat">
+        <div class="feat-ico"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg></div>
+        <h3>无线串口桥</h3>
+        <p>目标板 UART 经 WiFi 桥到浏览器或 TCP 3333，9600 ~ 921600 波特率动态切换，支持 HEX、时间戳、RX/TX 双色显示。</p>
+        <span class="tag">UART1 · TCP 3333 · 921600</span>
+      </div>
+      <div class="feat">
+        <div class="feat-ico"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M17.5 14v7M14 17.5h7"/></svg></div>
+        <h3>协议分析仪</h3>
+        <p>PWM 频率/占空比实时测量与输出；SPI 默认从机抓包、可切主机读写；I2C 嗅探读写事务，事务日志可导出 CSV。</p>
+        <span class="tag">PWM · SPI · I2C</span>
+      </div>
+      <div class="feat">
+        <div class="feat-ico"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/><path d="M4 4l3 3M20 4l-3 3"/></svg></div>
+        <h3>OTA 双分区升级</h3>
+        <p>浏览器选个 bin 就无线刷固件，ota_0 / ota_1 双槽互为备份，新固件启动异常自动回滚，再也不怕中途断电变砖。</p>
+        <span class="tag">ota_0 / ota_1 · 自动回滚</span>
+      </div>
+      <div class="feat">
+        <div class="feat-ico"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8M12 17v4"/><path d="M7 10h4M7 13h7"/></svg></div>
+        <h3>OLED + Web 双界面</h3>
+        <p>板载 SSD1306 OLED 六屏直翻菜单加 NexLink 开机动画，脱机也能操作；同一套状态在 Web 控制台远程预览、远程按键。</p>
+        <span class="tag">SSD1306 128×64 · 6 屏</span>
+      </div>
+      <div class="feat">
+        <div class="feat-ico"><svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="12" rx="3"/><path d="M12 7V4M9 4h6"/><circle cx="9" cy="13" r="1.2" fill="currentColor" stroke="none"/><circle cx="15" cy="13" r="1.2" fill="currentColor" stroke="none"/><path d="M9 16.5h6"/></svg></div>
+        <h3>MCP：让 AI 操硬件</h3>
+        <p>内置 MCP Server，24 个工具覆盖连接、串口收发、抓包导出、总线读写、目标复位——让 AI 直接帮你读寄存器、抓波形、烧固件。</p>
+        <span class="tag">24 tools · Model Context Protocol</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= OLED ================= -->
+<section id="oled">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kick">On-board Display</div>
+      <h2>不连电脑，板子自己也有界面</h2>
+      <p>开机先看一眼 NexLink 动画，六个屏幕用 SW1 / SW3 翻页，底部高亮动作条直接告诉你当前按 SW2 会做什么。</p>
+    </div>
+    <div class="oled-band">
+      <div class="oled-device">
+        <div class="oled-screen"><canvas id="oledBig" width="128" height="64"></canvas></div>
+        <div class="oled-keys">
+          <span class="oled-key">SW1 上</span>
+          <span class="oled-key sel">SW2 选择</span>
+          <span class="oled-key">SW3 下</span>
+        </div>
+      </div>
+      <div class="oled-txt">
+        <h3>六屏直翻，所见即所按</h3>
+        <ul>
+          <li><b>开机动画</b>：NexLink 逐字打出 + 进度条，约 1.4 秒</li>
+          <li><b>STATUS / UART</b>：WiFi、IP、运行时长与串口计数</li>
+          <li><b>SWD / TARGET</b>：引脚一行显示，IDCODE 常显可读</li>
+          <li><b>PWM / USB</b>：测量值与 DAP / TTL / OFF 角色切换</li>
+          <li>底部<b>高亮动作条</b>写明当前 SW2 的动作，不用猜</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 引脚 ================= -->
+<section id="pins">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kick">Pinout</div>
+      <h2>16 Pin 排针，一根 USB-C 供电</h2>
+      <p>整板 3.3V 直连 ESP32-S3，调试线、串口线、总线探针全部从这一排针引出。</p>
+    </div>
+    <div class="pin-grid">
+      <div class="table-card">
+        <table>
+          <thead><tr><th style="width:34%">排针信号</th><th style="width:22%">ESP32-S3</th><th>用途</th></tr></thead>
+          <tbody>
+            <tr><td class="sig">5V / 3V3 / GND×2</td><td class="io">—</td><td class="note">USB-C 5V 直出、LDO 3.3V、共地</td></tr>
+            <tr><td class="sig">TXD0 / RXD0</td><td class="io">IO43 / IO44</td><td class="note">本板控制台日志（115200）</td></tr>
+            <tr><td class="sig">TXD1 / RXD1</td><td class="io">IO47 / IO21</td><td class="note">到目标板的串口桥（TCP 3333 / USB-TTL）</td></tr>
+            <tr><td class="sig">SCL / SDA</td><td class="io">IO10 / IO11</td><td class="note">I2C0，与 OLED 共用，可嗅探外部 I2C</td></tr>
+            <tr><td class="sig">NRST</td><td class="io">IO12</td><td class="note">目标复位（/api/dut/reset）</td></tr>
+            <tr><td class="sig">SWCLK / SWDIO</td><td class="io">IO13 / IO14</td><td class="note">CMSIS-DAP 探针（dap 模式）</td></tr>
+            <tr><td class="sig">TDI / TDO / nTRST</td><td class="io">IO48 / IO38 / IO39</td><td class="note">JTAG 调试（探针独占）</td></tr>
+            <tr><td class="sig">SWO</td><td class="io">IO40</td><td class="note">ITM 跟踪，目标 printf 单向输出</td></tr>
+            <tr><td class="sig">拓展 IO</td><td class="io">IO45 等 ×5</td><td class="note">协议可排列：PWM/GPIO/SCK/MOSI/MISO/CS/SDA/SCL</td></tr>
+          </tbody>
+        </table>
+        <div class="warn-box" style="margin:14px;border-radius:0 0 0 0;border-left:none;border-right:none;border-bottom:none">
+          注意：排针全部 3.3V、无电平转换。接 3.3V 目标安全；接 5V 逻辑目标必须自行加电平转换。
+        </div>
+      </div>
+      <div class="quick">
+        <div class="quick-item">
+          <h4><span class="n">1</span>无线串口调试</h4>
+          <p><code>TXD1→目标RX</code>、<code>RXD1←目标TX</code>、<code>GND</code>，浏览器一连即得无线串口助手。</p>
+        </div>
+        <div class="quick-item">
+          <h4><span class="n">2</span>SWD 调试 / 下载</h4>
+          <p><code>SWCLK</code>、<code>SWDIO</code>、<code>NRST</code>、<code>GND</code>，USB 角色切到 <code>dap</code>，Keil / pyOCD 直接认。</p>
+        </div>
+        <div class="quick-item">
+          <h4><span class="n">3</span>USB-TTL 无线烧录</h4>
+          <p><code>TXD1/RXD1</code> 交叉 + <code>NRST</code> + 任一拓展 IO 接 <code>BOOT</code>，<code>/api/dut/reset?boot=1</code> 全程无线进下载模式。</p>
+        </div>
+        <div class="quick-item">
+          <h4><span class="n">4</span>总线抓包</h4>
+          <p>I2C 用 <code>SCL/SDA</code>；SPI 用拓展 IO 排 <code>SCK/MOSI/MISO/CS</code>；PWM 任意拓展 IO，Web「总线」页直接看。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 快速开始 ================= -->
+<section id="start">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kick">Get Started</div>
+      <h2>三分钟把固件跑起来</h2>
+      <p>第一次用 USB 串口烧录，之后所有升级都走 OTA，无线完成。</p>
+    </div>
+    <div class="start-grid">
+      <div class="code-card">
+        <div class="ch">
+          <svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z" opacity="0"/><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+          方式一 · USB 串口首次烧录
+        </div>
+        <div class="cbody">
+          <p>到 <a href="https://github.com/zizhennini/nexlink/releases/tag/v1.0.0" target="_blank" rel="noopener">Release v1.0.0</a> 下载 <b>nexlink.bin</b>，USB 角色保持 <b>OFF</b>（原生 USB-Serial-JTAG，COM 口直连）：</p>
+        </div>
+<pre><span class="k"># esptool 直接写入 app 分区（地址以分区表为准）</span>
+python -m esptool --chip esp32s3 -p COM11 -b 460800 \
+  --before default_reset --after hard_reset \
+  write_flash 0x10000 <span class="s3">nexlink.bin</span></pre>
+      </div>
+      <div class="code-card">
+        <div class="ch">
+          <svg viewBox="0 0 24 24"><path d="M2 8.8l10-5 10 5-10 5z"/><path d="M6 11v5c0 1.5 2.7 3 6 3s6-1.5 6-3v-5"/><path d="M22 9v5"/></svg>
+          方式二 · OTA 无线升级（推荐）
+        </div>
+        <div class="cbody">
+          <p>板子连上 WiFi 后，浏览器打开 <b>http://设备IP/</b>，在「系统 → OTA」选 bin 刷入；或直接命令行：</p>
+        </div>
+<pre><span class="k"># 限速 40K，避免小内存 HTTP 缓冲被打爆</span>
+curl -X POST -H <span class="s4">"Expect:"</span> \
+  -H <span class="s4">"Content-Type: application/octet-stream"</span> \
+  --data-binary @<span class="s3">nexlink.bin</span> \
+  --limit-rate 40K \
+  http://<span class="s2">192.168.4.1</span>/api/ota</pre>
+        <div class="cbody" style="padding-top:0"><p>AP 模式默认：SSID <b>NexLink-xxxx</b>，密码 <b>12345678</b>，设备地址 <b>192.168.4.1</b>。</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 最终 CTA ================= -->
+<section class="final">
+  <div class="wrap">
+    <h2>把调试桌上的线，全部剪掉</h2>
+    <p>开源固件、Web 控制台、MCP Server 全部在 GitHub，欢迎 Star、Issue 和 PR。</p>
+    <div class="hero-cta" style="margin-top:0">
+      <a class="btn primary" href="https://github.com/zizhennini/nexlink" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.55v-2.15c-3.2.7-3.87-1.36-3.87-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.23-1.28-5.23-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.8 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.69 5.38-5.25 5.67.41.36.78 1.06.78 2.14v3.17c0 .3.21.67.8.55A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5z" fill="currentColor" stroke="none"/></svg>
+        在 GitHub 上查看 NexLink
+      </a>
+      <a class="btn" href="https://github.com/zizhennini/nexlink/releases/tag/v1.0.0" target="_blank" rel="noopener">下载 v1.0.0 固件</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot-in">
+    <div class="logo" style="width:26px;height:26px;border-radius:8px">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#05303a" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4.5 12a10.5 10.5 0 0 1 15 0"/><path d="M7.8 15.2a6 6 0 0 1 8.4 0"/>
+        <circle cx="12" cy="18.6" r="1.5" fill="#05303a" stroke="none"/>
+      </svg>
+    </div>
+    <span>NexLink · 无线硬件调试器</span>
+    <span style="color:#3a4759">|</span>
+    <span>Built by <a href="https://github.com/zizhennini" target="_blank" rel="noopener" style="color:var(--accent);font-weight:700">zizhennini</a> · ESP32-S3</span>
+    <span class="mr">
+      <a href="https://github.com/zizhennini/nexlink" target="_blank" rel="noopener"><svg viewBox="0 0 24 24"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.55v-2.15c-3.2.7-3.87-1.36-3.87-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.23-1.28-5.23-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.8 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.69 5.38-5.25 5.67.41.36.78 1.06.78 2.14v3.17c0 .3.21.67.8.55A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5z"/></svg>Source</a>
+      <a href="https://github.com/zizhennini/nexlink/releases" target="_blank" rel="noopener">Releases</a>
+    </span>
+  </div>
+</footer>
+
+<!-- ================= 交互脚本 ================= -->
+<script>
+(function(){
+  "use strict";
+
+  /* ---- 控制台 tab 切换 ---- */
+  var tabs = document.querySelectorAll("#cTabbar button");
+  var pages = document.querySelectorAll(".c-page");
+  var cBody = document.getElementById("cBody");
+  tabs.forEach(function(b){
+    b.addEventListener("click", function(){
+      var name = b.getAttribute("data-cpage");
+      tabs.forEach(function(x){ x.classList.remove("on"); });
+      pages.forEach(function(x){ x.classList.remove("on"); });
+      b.classList.add("on");
+      var pg = document.querySelector('.c-page[data-cpage="'+name+'"]');
+      pg.classList.add("on");
+      cBody.scrollTop = 0;
+      if(name === "status") drawLcdMini();
+    });
+  });
+
+  /* ---- 总线 subtab ---- */
+  var busTabs = document.querySelectorAll("#busTabs button");
+  var busPanes = document.querySelectorAll(".bus-pane");
+  busTabs.forEach(function(b){
+    b.addEventListener("click", function(){
+      var name = b.getAttribute("data-bus");
+      busTabs.forEach(function(x){ x.classList.remove("on"); });
+      busPanes.forEach(function(x){ x.classList.remove("on"); });
+      b.classList.add("on");
+      document.querySelector('.bus-pane[data-buspane="'+name+'"]').classList.add("on");
+      drawWaves();
+    });
+  });
+
+  /* ---- USB 角色 segmented（纯演示） ---- */
+  document.querySelectorAll("#usbSeg button").forEach(function(b){
+    b.addEventListener("click", function(){
+      document.querySelectorAll("#usbSeg button").forEach(function(x){ x.classList.remove("on"); });
+      b.classList.add("on");
+    });
+  });
+
+  /* ---- 串口终端演示日志 ---- */
+  var termLines = [
+    {t:"14:52:01.102", c:"sy", x:"--- NexLink boot ---"},
+    {t:"14:52:01.118", c:"rx", x:"ets Jul 29 2024 12:00:00\r\n"},
+    {t:"14:52:01.240", c:"rx", x:"cpu_start: ESP32-S3 QFN56 rev v0.2, dual core, 240MHz\r\n"},
+    {t:"14:52:01.455", c:"rx", x:"nexlink: wifi sta connecting to '3-407' ...\r\n"},
+    {t:"14:52:02.013", c:"rx", x:"nexlink: got ip 192.168.4.1, rssi -47 dBm\r\n"},
+    {t:"14:52:02.040", c:"rx", x:"dap: CMSIS-DAP v2.1 ready (winusb)\r\n"},
+    {t:"14:52:02.061", c:"rx", x:"http: listening on :80, tcp bridge on :3333\r\n"},
+    {t:"14:52:03.882", c:"tx", x:"AT\r\n"},
+    {t:"14:52:03.905", c:"rx", x:"AT\r\nOK\r\n"},
+    {t:"14:52:05.317", c:"rx", x:"[sensor] temp=26.4C hum=48% vbat=3.27V\r\n"},
+    {t:"14:52:06.904", c:"tx", x:"GET /api/status\r\n"},
+    {t:"14:52:06.930", c:"rx", x:"{\"wifi\":\"sta\",\"slot\":\"ota_1\",\"ota\":\"ok\"}\r\n"},
+    {t:"14:52:08.116", c:"rx", x:"[sensor] temp=26.5C hum=48% vbat=3.27V\r\n"}
+  ];
+  var termEl = document.getElementById("termDemo");
+  function renderTerm(){
+    termEl.innerHTML = termLines.map(function(l){
+      return '<span class="ts">['+l.t+'] </span><span class="'+l.c+'">'+
+        l.x.replace(/&/g,"&amp;").replace(/</g,"&lt;") + '</span>';
+    }).join("");
+  }
+  renderTerm();
+
+  /* ---- 事务日志 ---- */
+  var spiLines = [
+    '<span class="w">MOSI</span> AA 55 01  &nbsp; <span class="r">MISO</span> FF FF 1B',
+    '<span class="w">MOSI</span> 03 00 00  &nbsp; <span class="r">MISO</span> FF FF C8',
+    '<span class="w">MOSI</span> AB CD EF  &nbsp; <span class="r">MISO</span> FF FF 00',
+    '<span class="w">MOSI</span> 9F 00 00  &nbsp; <span class="r">MISO</span> FF FF EF'
+  ];
+  var i2cLines = [
+    '<span class="w">W</span> 0x50 &lt; 00 10 &nbsp; <span class="r">R</span> 0x50 &gt; A3 7F',
+    '<span class="w">W</span> 0x68 &lt; 6B 80 &nbsp; (PWR_MGMT reset)',
+    '<span class="w">W</span> 0x68 &lt; 1C 08 &nbsp; (ACCEL_SCALE 4g)',
+    '<span class="r">R</span> 0x68 &gt; 3B 00 F2 11 &nbsp; (temp/acc raw)'
+  ];
+  document.getElementById("spiLog").innerHTML = spiLines.join("<br>");
+  document.getElementById("i2cLog").innerHTML = i2cLines.join("<br>");
+
+  /* ---- 方波 / SPI 波形 ---- */
+  function squareWave(id, period, duty, color){
+    var cv = document.getElementById(id);
+    if(!cv) return;
+    var ctx = cv.getContext("2d"), w = cv.width, h = cv.height;
+    ctx.clearRect(0,0,w,h);
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.shadowColor = color; ctx.shadowBlur = 5;
+    ctx.beginPath();
+    var hi = h*0.22, lo = h*0.78, x = 4;
+    ctx.moveTo(x, lo);
+    while(x < w-4){
+      var pw = w/period;
+      ctx.lineTo(x, lo); ctx.lineTo(x, hi);
+      ctx.lineTo(x + pw*duty, hi); ctx.lineTo(x + pw*duty, lo);
+      x += pw;
+    }
+    ctx.stroke(); ctx.shadowBlur = 0;
+    ctx.strokeStyle = "rgba(92,105,125,.25)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0,h/2); ctx.lineTo(w,h/2); ctx.stroke();
+  }
+  function spiWave(){
+    var cv = document.getElementById("spiWave");
+    if(!cv) return;
+    var ctx = cv.getContext("2d"), w = cv.width, h = cv.height;
+    ctx.clearRect(0,0,w,h);
+    var colors = ["#34d399","#fbbf24","#38bdf8"];
+    var labels = ["CLK","MOSI","MISO"];
+    var mosiPat = [1,0,1,1,0,0,1,0], misoPat = [1,1,0,0,0,1,1,1];
+    for(var ch=0; ch<3; ch++){
+      var base = 14 + ch*26, amp = 9;
+      ctx.strokeStyle = colors[ch]; ctx.lineWidth = 1.6;
+      ctx.fillStyle = colors[ch]; ctx.font = "10px monospace";
+      ctx.fillText(labels[ch], 4, base-6);
+      ctx.beginPath();
+      var x = 42;
+      for(var i=0; i<64; i++){
+        var bit;
+        if(ch===0) bit = i % 2;                 /* CLK：连续时钟脉冲 */
+        else if(ch===1) bit = mosiPat[i % 8];   /* MOSI：数据 0xB2 */
+        else bit = misoPat[i % 8];              /* MISO：从机返回 */
+        var y = bit ? base-amp : base+amp;
+        ctx.lineTo(x, y); x += 8;
+      }
+      ctx.stroke();
+    }
+  }
+  function drawWaves(){
+    squareWave("pwmWave", 60, 0.5, "#34d399");
+    spiWave();
+  }
+
+  /* ---- OLED 绘制（复刻真机 STATUS 屏风格） ---- */
+  function drawOled(cv, big){
+    var ctx = cv.getContext("2d");
+    var W = cv.width, H = cv.height;
+    ctx.fillStyle = "#000"; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = "#00d8ff";
+    // 标题行
+    ctx.font = (big ? "bold 16px" : "bold 10px") + " monospace";
+    ctx.textBaseline = "top";
+    ctx.fillText("STATUS", 2, 2);
+    ctx.font = (big ? "10px" : "7px") + " monospace";
+    ctx.fillText("1/6", W-22, 5);
+    ctx.fillRect(0, big?17:12, W, 1);
+    // 数据行 A
+    ctx.font = (big ? "11px" : "8px") + " monospace";
+    ctx.fillText("WiFi: STA 3-407", 2, big?21:15);
+    ctx.fillText("IP: 192.168.4.1", 2, big?35:25);
+    // 底部分隔
+    ctx.fillRect(0, big?47:34, W, 1);
+    // 底部高亮动作条（黑底青字 -> 真机为反白：青底黑字）
+    ctx.fillStyle = "#00d8ff";
+    ctx.fillRect(0, H-(big?16:12), W, big?16:12);
+    ctx.fillStyle = "#000";
+    ctx.font = (big ? "bold 11px" : "bold 8px") + " monospace";
+    ctx.fillText("> 读取 IDCODE", 4, H-(big?14:10));
+  }
+  function drawLcdMini(){ drawOled(document.getElementById("lcdCvMini"), false); }
+
+  /* ---- 初始化 ---- */
+  drawWaves();
+  drawLcdMini();
+  drawOled(document.getElementById("oledBig"), true);
+})();
+</script>
+</body>
+</html>
+</body>
+</html>
