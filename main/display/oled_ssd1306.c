@@ -7,12 +7,10 @@
  *
  * Text uses the two glyph sources already carried by the project:
  *   - font8x16.h  : 8x16 ASCII (VGA derived), same as before
- *   - HZK16       : 16x16 GB2312 CJK, looked up through cjk_font.c
  */
 #include "oled_ssd1306.h"
 #include "pinout.h"
 #include "font8x16.h"
-#include "cjk_font.h"
 
 #include <string.h>
 #include "driver/i2c_master.h"
@@ -175,57 +173,6 @@ esp_err_t oled_set_power(bool on)
     return oled_cmd1(on ? 0xAF : 0xAE);
 }
 
-/* ---- Slide-transition support (used by menu_ui page changes) ---- */
-
-void oled_fb_snapshot(uint8_t *dst)
-{
-    memcpy(dst, s_fb, OLED_FB_BYTES);
-}
-
-/*
- * Frame-stepped vertical slide from the previous screen (the 'old' snapshot)
- * into the current framebuffer contents. Every intermediate frame is flushed
- * here, so this MUST run from the single UI render task - never concurrently
- * with another flush (the panel sits on a shared I2C bus).
- *   dir > 0: content moves up; old exits through the top, the new screen
- *            slides in from the bottom ("next page").
- *   dir < 0: content moves down; old exits through the bottom, the new screen
- *            slides in from the top ("previous page" / "back").
- * frames is clamped to 1..OLED_PAGES; each frame advances a whole page (8 px)
- * so a frame is pure memcpy - no bit shuffling across page boundaries.
- */
-void oled_slide_from(const uint8_t *old, int dir, int frames)
-{
-    if (!s_ready) return;
-    if (frames < 1) frames = 1;
-    if (frames > OLED_PAGES) frames = OLED_PAGES;
-
-    uint8_t newfb[OLED_FB_BYTES];
-    memcpy(newfb, s_fb, OLED_FB_BYTES);
-
-    for (int f = 1; f <= frames; f++) {
-        int moved = (OLED_PAGES * f) / frames;
-        if (moved > OLED_PAGES) moved = OLED_PAGES;
-
-        if (dir > 0) {
-            int vis = OLED_PAGES - moved;   /* pages of the old screen still seen */
-            for (int p = 0; p < vis; p++)
-                memcpy(&s_fb[p * OLED_WIDTH], &old[(p + moved) * OLED_WIDTH], OLED_WIDTH);
-            for (int p = vis; p < OLED_PAGES; p++)
-                memcpy(&s_fb[p * OLED_WIDTH], &newfb[(p - vis) * OLED_WIDTH], OLED_WIDTH);
-        } else {
-            for (int p = 0; p < moved; p++)
-                memcpy(&s_fb[p * OLED_WIDTH], &newfb[(OLED_PAGES - moved + p) * OLED_WIDTH], OLED_WIDTH);
-            for (int p = moved; p < OLED_PAGES; p++)
-                memcpy(&s_fb[p * OLED_WIDTH], &old[(p - moved) * OLED_WIDTH], OLED_WIDTH);
-        }
-        oled_flush();
-    }
-
-    /* Leave the framebuffer exactly in the new page's state. */
-    memcpy(s_fb, newfb, OLED_FB_BYTES);
-}
-
 esp_err_t oled_set_contrast(uint8_t contrast_0_255)
 {
     uint8_t c[2] = { 0x81, contrast_0_255 };
@@ -355,82 +302,6 @@ void oled_text(int x, int y, const char *text, bool inv)
         if (cx >= 0) oled_char(cx, y, *p, inv);
         cx += OLED_CHAR_W;
     }
-}
-
-void oled_cjk(int x, int y, const uint8_t *bitmap, bool inv)
-{
-    if (!bitmap) return;
-    /* HZK16 layout: 16 rows, 2 bytes each, big endian, MSB is the left pixel. */
-    for (int row = 0; row < 16; row++) {
-        uint16_t bits = (uint16_t)((bitmap[row * 2] << 8) | bitmap[row * 2 + 1]);
-        for (int col = 0; col < 16; col++) {
-            bool lit = (bits >> (15 - col)) & 1;
-            oled_pixel(x + col, y + row, inv ? !lit : lit);
-        }
-    }
-}
-
-static void cjk_placeholder(int x, int y, bool inv)
-{
-    oled_fill_rect(x, y, 16, 16, inv);
-    oled_rect(x, y, 16, 16, !inv);
-}
-
-int oled_utf8(int x, int y, const char *text, bool inv)
-{
-    if (!text) return x;
-    int cx = x;
-    const uint8_t *p = (const uint8_t *)text;
-
-    while (*p) {
-        if (*p < 0x80) {
-            /* ASCII */
-            if (cx + OLED_CHAR_W > OLED_WIDTH) break;
-            if (cx >= 0) oled_char(cx, y, (char)*p, inv);
-            cx += OLED_CHAR_W;
-            p++;
-        } else if ((*p & 0xE0) == 0xC0) {
-            /* 2-byte UTF-8: not mapped by HZK16, show a placeholder */
-            if (cx + OLED_CJK_W > OLED_WIDTH) break;
-            if (cx >= 0) cjk_placeholder(cx, y, inv);
-            cx += OLED_CJK_W;
-            p += (*p && p[1]) ? 2 : 1;
-        } else if ((*p & 0xF0) == 0xE0) {
-            /* 3-byte UTF-8: CJK */
-            if (cx + OLED_CJK_W > OLED_WIDTH) break;
-            if (cx >= 0) {
-                const uint8_t *bmp = cjk_get_bitmap_utf8(p, 3);
-                if (bmp) oled_cjk(cx, y, bmp, inv);
-                else     cjk_placeholder(cx, y, inv);
-            }
-            cx += OLED_CJK_W;
-            p += 3;
-        } else {
-            /* 4-byte UTF-8 or stray continuation byte: skip one byte */
-            if (cx + OLED_CJK_W > OLED_WIDTH) break;
-            if (cx >= 0) cjk_placeholder(cx, y, inv);
-            cx += OLED_CJK_W;
-            p++;
-        }
-    }
-    return cx;
-}
-
-int oled_utf8_width(const char *text, int max_px)
-{
-    if (!text) return 0;
-    int w = 0;
-    const uint8_t *p = (const uint8_t *)text;
-    while (*p) {
-        int adv;
-        if (*p < 0x80) { adv = OLED_CHAR_W; p++; }
-        else if ((*p & 0xE0) == 0xC0) { adv = OLED_CJK_W; p += (p[1] ? 2 : 1); }
-        else if ((*p & 0xF0) == 0xE0) { adv = OLED_CJK_W; p += 3; }
-        else { adv = OLED_CJK_W; p++; }
-        if (w + adv > max_px) break;
-        w += adv;
-    }
-    return w;
 }
 
 const uint8_t *oled_get_fb(void)

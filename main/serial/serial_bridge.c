@@ -221,6 +221,14 @@ esp_err_t serial_bridge_init(uint32_t baudrate)
         goto fail;
     }
 
+    /* 内部上拉：RX 悬空时保持高电平，不收人体噪声；TX 也上拉，空闲稳定 */
+    if (rx_pin >= 0) {
+        gpio_pullup_en((gpio_num_t)rx_pin);
+        gpio_pulldown_dis((gpio_num_t)rx_pin);
+    }
+    gpio_pullup_en((gpio_num_t)tx_pin);
+    gpio_pulldown_dis((gpio_num_t)tx_pin);
+
     /* Start event task */
     if (xTaskCreate(uart_event_task, "serial_evt", SERIAL_STACK_SIZE,
                     NULL, SERIAL_TASK_PRIO, &s_task) != pdTRUE) {

@@ -58,18 +58,6 @@ bool oled_is_ready(void);
 /* Push the whole framebuffer to the panel. */
 esp_err_t oled_flush(void);
 
-/* ---- Slide-transition support ---- */
-
-/* Copy the current framebuffer (OLED_FB_BYTES) into `dst`. */
-void oled_fb_snapshot(uint8_t *dst);
-
-/* Animate a vertical slide from the `old` snapshot into whatever the
- * framebuffer holds now, flushing every intermediate frame. Call this ONLY
- * from the UI render task (it owns the panel). dir>0: new screen enters from
- * the bottom (next); dir<0: new screen enters from the top (previous/back).
- * frames: 1..8, one display page (8px) per frame. */
-void oled_slide_from(const uint8_t *old, int dir, int frames);
-
 /* ---- Direct panel control ---- */
 esp_err_t oled_set_power(bool on);
 esp_err_t oled_set_contrast(uint8_t contrast_0_255);
@@ -97,16 +85,15 @@ void oled_char(int x, int y, char ch, bool inv);
 /* ASCII string, one glyph per 8px. Characters past the right edge are clipped. */
 void oled_text(int x, int y, const char *text, bool inv);
 
-/* 16x16 CJK glyph from an HZK16 bitmap (32 bytes, 2 bytes per row, MSB left). */
-void oled_cjk(int x, int y, const uint8_t *bitmap, bool inv);
-
-/* Mixed UTF-8 string: ASCII advances 8px, 3-byte CJK advances 16px. Unmapped
- * non-ASCII codepoints draw a hollow 16x16 box so the gap is visible.
- * Returns the x coordinate just past the last glyph. */
-int  oled_utf8(int x, int y, const char *text, bool inv);
-
-/* Length in pixels that oled_utf8() would consume, capped at max_px. */
-int  oled_utf8_width(const char *text, int max_px);
+/* CJK rendering was REMOVED with the dashboard rewrite: the HZK16 font and its
+ * 297 kB of embedded data were only ever used by the old menu, and the
+ * dashboard is ASCII-only.
+ *
+ * oled_utf8() and oled_utf8_width() were declared here and are deliberately no
+ * longer: their implementations are gone, and a declaration for something that
+ * cannot link is worse than no declaration, because it invites a call that only
+ * fails at link time. Non-ASCII output needs the font stack restored first
+ * (cjk_font.c, HZK16, uni2gb.bin - all in git history). */
 
 /* ---- Remote mirroring (HTTP / WS screen preview) ---- */
 const uint8_t *oled_get_fb(void);

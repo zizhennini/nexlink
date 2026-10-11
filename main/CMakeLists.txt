@@ -8,9 +8,7 @@ idf_component_register(SRCS
                        "i2c_mon.c"
                        "buttons/buttons.c"
                        "display/oled_ssd1306.c"
-                       "display/menu_ui.c"
-                       "display/boot_splash.c"
-                       "display/cjk_font.c"
+                       "display/dash_ui.c"
                        "net/tcp_server.c"
                        "net/http_status.c"
                        # WebSocket push (real-time UART stream to the web UI)
@@ -77,7 +75,4 @@ idf_component_register(SRCS
                        # is a private dependency of CherryUSB's ESP port.
                        cherry-embedded__cherryusb
                        usb
-                       EMBED_FILES
-                       "display/HZK16"
-                       "display/uni2gb.bin"
                        )

@@ -2,8 +2,9 @@
  * NexLink - Main Entry Point
  * ESP32-S3-WROOM-1 (N16R8: 16MB quad flash + 8MB octal PSRAM)
  *
- * SSD1306 128x64 OLED menu UI + USB CMSIS-DAP probe + TCP serial bridge (3333)
- * + HTTP status / MCP API (80) + raw CMSIS-DAP over TCP (5555).
+ * SSD1306 128x64 OLED dashboard (main/display/dash_ui.c) + USB CMSIS-DAP probe
+ * + TCP serial bridge (3333) + HTTP status / MCP API (80) + raw CMSIS-DAP over
+ * TCP (5555) + WebSocket push.
  */
 #include <string.h>
 #include "esp_log.h"
@@ -15,8 +16,7 @@
 #include "freertos/task.h"
 #include "pinout.h"
 #include "oled_ssd1306.h"
-#include "boot_splash.h"
-#include "menu_ui.h"
+#include "dash_ui.h"
 #include "wifi_manager.h"
 #include "serial_bridge.h"
 #include "capture.h"
@@ -63,24 +63,23 @@ static void on_serial_rx(const uint8_t *data, size_t len)
     /* Push to WebSocket clients as it arrives: the browser no longer has to
      * poll /api/data, and short bursts are no longer coalesced or lost. */
     ws_broadcast_data(0, data, len);
-    menu_push_rx_data(data, len);
+    dash_push_rx(data, len);
 }
 
 static void on_button_event(button_id_t btn, button_event_t event)
 {
-    /* Navigation only - page functions (AP, baud, buffers) live in Config.
-     * SW1=left=up/previous, SW3=right=down/next, SW2=middle=context. */
+    /* The dashboard has one action per screen; SW2 carries it. */
     if (event == BTN_EVENT_PRESS) {
         switch (btn) {
-        case BTN_SW1: menu_on_sw1_press(); break;   /* up / previous page */
-        case BTN_SW2: menu_on_sw2_press(); break;   /* enter / context    */
-        case BTN_SW3: menu_on_sw3_press(); break;   /* down / next page   */
+        case BTN_SW1: dash_prev_screen(); break;   /* previous screen */
+        case BTN_SW2: dash_action(); break;        /* that screen's action */
+        case BTN_SW3: dash_next_screen(); break;   /* next screen */
         default: break;
         }
     } else if (event == BTN_EVENT_HOLD) {
-        /* SW2 held ~600 ms: cancel a config edit or slide back to home.
-         * SW1/SW3 have no hold action (their release still fires a click). */
-        if (btn == BTN_SW2) menu_on_sw2_long_press();
+        /* SW2 held ~600 ms: back to the first screen. SW1/SW3 have no hold
+         * action (their release still fires a click). */
+        if (btn == BTN_SW2) dash_home();
     }
     /* BTN_EVENT_RELEASE and the retired BTN_EVENT_LONG_PRESS are ignored. */
 }
@@ -90,9 +89,15 @@ static void on_button_event(button_id_t btn, button_event_t event)
 static void ui_task(void *arg)
 {
     (void)arg;
+    dash_boot_animation();
     while (1) {
-        menu_render();
-        menu_ui_wait(200);
+        /* Wait first, then render. "Render then wait 200 ms" made a button
+         * press invisible for up to a fifth of a second: the handler only
+         * kicked the task, and the repaint waited for the next loop. Waiting
+         * first means every wake - button or timeout - is followed immediately
+         * by a repaint. */
+        dash_wait(200);
+        dash_render();
     }
 }
 
@@ -115,12 +120,7 @@ void app_main(void)
     if (oled_init() != ESP_OK) {
         ESP_LOGW(TAG, "OLED unavailable - continuing headless");
     }
-    menu_init();
-
-    /* Power-on animation: the wordmark only. It runs before the network comes
-     * up, so there is no address to show yet. Skipped when there is no panel so
-     * a headless boot is not delayed. */
-    if (oled_is_ready()) boot_splash_run(900);
+    dash_init();
 
     wifi_manager_init();
     pin_config_init();
@@ -193,17 +193,6 @@ void app_main(void)
         }
     } else {
         ESP_LOGI(TAG, "USB off: IO19/IO20 free (Config page or /api/usb_mode to pick DAP/TTL)");
-    }
-
-    /* The network is up by now, so replace the generic sweep with a "ready"
-     * card carrying the address - that is the one thing the user needs to read
-     * off the panel. It is shown for a moment and then the menu task (started
-     * just below) takes the panel over. */
-    if (oled_is_ready()) {
-        char ip[16] = {0};
-        wifi_manager_get_ip_str(ip, sizeof(ip));
-        boot_splash_ready(ip[0] ? ip : NULL);
-        vTaskDelay(pdMS_TO_TICKS(1200));
     }
 
     /* The panel task runs one notch BELOW the HTTP server, which IDF also

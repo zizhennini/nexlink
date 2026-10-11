@@ -1,0 +1,957 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>NexLink 无线调试器</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect width='24' height='24' rx='5' fill='%2322d3ee'/><g fill='none' stroke='%2305303a' stroke-width='2' stroke-linecap='round'><path d='M4.5 12a10.5 10.5 0 0 1 15 0'/><path d='M7.8 15.2a6 6 0 0 1 8.4 0'/><circle cx='12' cy='18.6' r='1.5' fill='%2305303a' stroke='none'/></g></svg>">
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+:root{
+  --bg:#080c13;--card:#121b27;--card2:#0e1621;--inset:#0a1019;--border:#202e42;
+  --fg:#e9eef6;--muted:#8b99ad;--faint:#5c697d;
+  --accent:#2dd4ee;--accent2:#38bdf8;--ok:#34d399;--warn:#fbbf24;--err:#fb7185;
+  --rx:#34d399;--tx:#fbbf24;
+}
+html,body{height:100%}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  background:var(--bg);color:var(--fg);font-size:14px;line-height:1.5;
+  padding:14px 12px calc(72px + env(safe-area-inset-bottom));
+  background-image:radial-gradient(900px 380px at 50% -120px,rgba(34,211,238,.14),transparent 70%);
+  background-repeat:no-repeat;
+}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.wrap{max-width:860px;margin:0 auto}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-thumb{background:#243448;border-radius:8px}
+::-webkit-scrollbar-track{background:transparent}
+
+/* ---------- brand hero ---------- */
+.hero{
+  position:relative;overflow:hidden;border-radius:18px;margin-bottom:14px;
+  padding:16px 18px;border:1px solid #1c3a47;
+  background:linear-gradient(135deg,#0d2a34 0%,#101c29 52%,#0d151f 100%);
+  box-shadow:0 12px 32px rgba(0,0,0,.4),inset 0 1px 0 rgba(255,255,255,.05);
+}
+.hero-glow{position:absolute;top:-60px;right:-30px;width:200px;height:200px;border-radius:50%;
+  background:radial-gradient(circle,rgba(45,212,238,.35),transparent 65%);pointer-events:none}
+.hero-row{position:relative;z-index:1;display:flex;align-items:center;gap:13px}
+.logo{
+  width:44px;height:44px;flex:0 0 auto;border-radius:13px;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#46e6f5,#0ea5e9);
+  box-shadow:0 8px 18px rgba(34,211,238,.4),inset 0 1px 0 rgba(255,255,255,.45);
+}
+.logo svg{width:27px;height:27px}
+.hero-txt{min-width:0}
+.brand-name{
+  font-size:23px;font-weight:800;letter-spacing:2px;line-height:1.05;
+  background:linear-gradient(90deg,#cffafe,#67e8f9 45%,#38bdf8);
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.brand-sub{font-size:11.5px;color:#8aa0b6;margin-top:5px;letter-spacing:2px}
+.badge{
+  margin-left:auto;flex:0 0 auto;
+  display:inline-flex;align-items:center;gap:6px;
+  font-size:12px;font-weight:600;padding:5px 11px;border-radius:999px;
+  background:#1a2533;color:var(--muted);border:1px solid var(--border);
+}
+.badge::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.badge.ok{color:var(--ok);background:rgba(52,211,153,.12);border-color:rgba(52,211,153,.35)}
+.badge.warn{color:var(--warn);background:rgba(251,191,36,.12);border-color:rgba(251,191,36,.35)}
+.badge.err{color:var(--err);background:rgba(251,113,133,.12);border-color:rgba(251,113,133,.35)}
+
+/* ---------- cards ---------- */
+.card{
+  background:linear-gradient(180deg,#131d29,#0f1823);
+  border:1px solid var(--border);border-radius:15px;
+  padding:15px 17px;margin-bottom:12px;
+  box-shadow:0 8px 22px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.03);
+}
+.card h2{display:flex;align-items:center;gap:9px;font-size:13.5px;font-weight:700;margin-bottom:3px}
+.card h2::before{content:"";width:3px;height:15px;border-radius:2px;
+  background:linear-gradient(var(--accent),var(--accent2));box-shadow:0 0 8px rgba(45,212,238,.6)}
+.card .sub{font-size:11.5px;color:var(--faint);margin-bottom:12px}
+.kv{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:8px 0;border-bottom:1px dashed rgba(32,46,66,.8);font-size:13px}
+.kv:last-child{border-bottom:none}
+.kv .k{color:var(--muted);flex-shrink:0}
+.kv .v{text-align:right;word-break:break-all}
+.kv .v.good{color:var(--ok)} .kv .v.bad{color:var(--err)} .kv .v.hot{color:var(--warn)}
+
+/* ---------- controls ---------- */
+input,select{
+  background:var(--inset);color:var(--fg);border:1px solid var(--border);
+  border-radius:10px;padding:10px 11px;font-size:13px;font-family:inherit;width:100%;
+  transition:border-color .15s,box-shadow .15s;
+}
+input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(45,212,238,.15)}
+input[type=file]{font-size:12px;color:var(--muted);padding:8px}
+select{appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M1 1l4 4 4-4' stroke='%238b99ad' fill='none' stroke-width='1.5'/></svg>");background-repeat:no-repeat;background-position:right 11px center;padding-right:28px}
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  border:1px solid var(--border);background:linear-gradient(180deg,#16222f,#101925);color:var(--fg);
+  border-radius:10px;padding:9px 16px;font-size:13px;font-weight:600;
+  font-family:inherit;cursor:pointer;flex-shrink:0;
+  box-shadow:0 3px 10px rgba(0,0,0,.25),inset 0 1px 0 rgba(255,255,255,.05);
+  transition:transform .1s,box-shadow .15s,filter .15s;
+}
+.btn:hover{filter:brightness(1.12)}
+.btn:active{transform:scale(.97)}
+.btn.primary{background:linear-gradient(180deg,#39e0f3,#14b8d8);border-color:#2dd4ee;color:#042730;font-weight:700;
+  box-shadow:0 6px 16px rgba(34,211,238,.32),inset 0 1px 0 rgba(255,255,255,.4)}
+.btn.ok{background:linear-gradient(180deg,#41dca5,#1fae82);border-color:#34d399;color:#05302a;font-weight:700;
+  box-shadow:0 6px 16px rgba(52,211,153,.28),inset 0 1px 0 rgba(255,255,255,.4)}
+.btn.danger{background:transparent;border-color:rgba(251,113,133,.5);color:var(--err);box-shadow:none}
+.btn.block{width:100%;margin-top:8px}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.field{margin-bottom:10px}
+.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}
+.row{display:flex;gap:8px;align-items:center}
+.row>*{flex:1}
+.row .keep{flex:0 0 auto}
+.switch{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer;user-select:none;flex-shrink:0}
+.switch input{width:auto;accent-color:var(--accent)}
+.hint{font-size:11.5px;color:var(--faint);margin-top:8px;line-height:1.6}
+
+/* segmented control */
+.seg{display:flex;gap:6px;background:var(--inset);border:1px solid var(--border);border-radius:12px;padding:5px}
+.seg button{
+  flex:1;border:none;background:transparent;color:var(--muted);
+  border-radius:9px;padding:9px 4px;font-size:12.5px;font-weight:600;
+  font-family:inherit;cursor:pointer;line-height:1.3;transition:background .15s,color .15s;
+}
+.seg button small{display:block;font-size:10px;font-weight:400;opacity:.8;margin-top:2px}
+.seg button.on{background:linear-gradient(180deg,#39e0f3,#14b8d8);color:#042730;box-shadow:0 4px 12px rgba(34,211,238,.3)}
+.seg button.on small{opacity:.85}
+
+/* sub tabs */
+.subtabs{display:flex;gap:6px;margin-bottom:12px;background:var(--inset);border:1px solid var(--border);border-radius:12px;padding:5px}
+.subtabs button{flex:1;border:none;background:transparent;color:var(--muted);border-radius:9px;padding:9px;font-size:13px;font-weight:600;font-family:inherit;cursor:pointer;transition:background .15s,color .15s}
+.subtabs button.on{background:#153040;color:var(--accent);box-shadow:inset 0 0 0 1px rgba(45,212,238,.25)}
+
+/* ---------- serial terminal ---------- */
+.term-toolbar{display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
+.term-toolbar select{width:auto;padding:7px 26px 7px 9px;font-size:12px}
+#term{
+  background:#060a10;border:1px solid var(--border);border-radius:11px;
+  padding:11px 13px;height:50vh;max-height:560px;overflow-y:auto;
+  font-size:12.5px;line-height:1.65;white-space:pre-wrap;word-break:break-all;
+  box-shadow:inset 0 2px 10px rgba(0,0,0,.45);
+}
+#term .rx{color:var(--rx)}
+#term .tx{color:var(--tx)}
+#term .sy{color:var(--faint)}
+#term .ts{color:#46536a}
+.send-row{display:flex;gap:8px;margin-top:8px}
+.send-row select{width:84px;flex:0 0 auto;padding:9px 24px 9px 8px}
+.send-row input{flex:1;min-width:0}
+
+/* ---------- OLED ---------- */
+.lcd-wrap{background:#000;border-radius:11px;padding:12px;display:flex;justify-content:center;margin-bottom:10px;
+  box-shadow:inset 0 0 0 1px #101826,0 6px 16px rgba(0,0,0,.35)}
+.lcd-wrap canvas{width:100%;max-width:320px;height:auto;image-rendering:pixelated}
+.lcd-btns{display:flex;gap:8px}
+.lcd-btns button{flex:1;padding:12px 0;font-weight:700}
+
+/* ---------- waves / logs ---------- */
+canvas.wave{width:100%;height:90px;background:#060a10;border:1px solid var(--border);border-radius:10px;margin:8px 0;box-shadow:inset 0 2px 8px rgba(0,0,0,.4)}
+.txn-log{background:#060a10;border:1px solid var(--border);border-radius:10px;padding:8px 11px;max-height:170px;overflow-y:auto;font-size:11.5px;margin:8px 0;box-shadow:inset 0 2px 8px rgba(0,0,0,.4)}
+.txn-log div{white-space:pre-wrap;word-break:break-all;line-height:1.7}
+.txn-log .mosi{color:var(--ok)} .txn-log .miso{color:var(--warn)} .txn-log .i2cw{color:var(--ok)} .txn-log .i2cr{color:var(--accent)}
+.result{font-size:12px;margin-top:8px;color:var(--muted);word-break:break-all}
+.result.err{color:var(--err)} .result.ok{color:var(--ok)}
+
+/* ---------- wifi list / OTA ---------- */
+.wifi-list{display:flex;flex-direction:column;gap:6px;margin:8px 0}
+.wifi-list button{text-align:left;padding:9px 12px;font-size:12.5px;display:flex;justify-content:space-between;width:100%}
+.wifi-list button .sig{color:var(--muted);font-size:11px;flex-shrink:0;margin-left:8px}
+.progress{height:8px;background:var(--inset);border-radius:99px;overflow:hidden;margin-top:10px;border:1px solid var(--border)}
+.progress i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2));box-shadow:0 0 10px rgba(45,212,238,.6);transition:width .2s}
+
+/* ---------- pages / bottom nav ---------- */
+.page{display:none;animation:fade .18s ease}
+.page.on{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+.tabbar{
+  position:fixed;left:0;right:0;bottom:0;z-index:50;
+  display:flex;background:rgba(12,17,25,.92);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border-top:1px solid var(--border);padding-bottom:env(safe-area-inset-bottom);
+}
+.tabbar button{
+  position:relative;flex:1;border:none;background:transparent;color:var(--faint);
+  font-family:inherit;font-size:11.5px;font-weight:600;
+  padding:9px 0 10px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:3px;
+  transition:color .15s;
+}
+.tabbar button svg{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;transition:transform .15s}
+.tabbar button.on{color:var(--accent)}
+.tabbar button.on svg{transform:translateY(-1px) scale(1.08)}
+.tabbar button.on::before{content:"";position:absolute;top:3px;width:46px;height:30px;border-radius:999px;
+  background:rgba(45,212,238,.14);border:1px solid rgba(45,212,238,.22);z-index:-1}
+
+/* ---------- toast ---------- */
+#toasts{position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:100;display:flex;flex-direction:column;gap:8px;width:min(90vw,420px)}
+.toast{
+  background:rgba(24,36,52,.96);backdrop-filter:blur(8px);border:1px solid var(--border);color:var(--fg);
+  border-radius:12px;padding:10px 16px;font-size:13px;text-align:center;
+  box-shadow:0 10px 28px rgba(0,0,0,.5);animation:fade .15s ease;
+}
+.toast.ok{border-color:rgba(52,211,153,.55)} .toast.err{border-color:rgba(251,113,133,.55)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+  <div class="hero-glow"></div>
+  <div class="hero-row">
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#05303a" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4.5 12a10.5 10.5 0 0 1 15 0"/>
+        <path d="M7.8 15.2a6 6 0 0 1 8.4 0"/>
+        <circle cx="12" cy="18.6" r="1.5" fill="#05303a" stroke="none"/>
+      </svg>
+    </div>
+    <div class="hero-txt">
+      <div class="brand-name">NexLink</div>
+      <div class="brand-sub">无线硬件调试器</div>
+    </div>
+    <span class="badge err" id="topBadge">连接中…</span>
+  </div>
+</div>
+
+  <!-- ============ 页面 1：串口终端 ============ -->
+  <div class="page on" id="page-serial">
+    <div class="card">
+      <h2>串口终端</h2>
+      <div class="sub">和目标板之间收发数据，相当于无线版串口助手</div>
+      <div class="term-toolbar">
+        <select id="baud" title="波特率">
+          <option value="9600">9600</option>
+          <option value="115200" selected>115200</option>
+          <option value="460800">460800</option>
+          <option value="921600">921600</option>
+        </select>
+        <label class="switch"><input type="checkbox" id="hexMode"> HEX 十六进制</label>
+        <label class="switch"><input type="checkbox" id="tsMode" checked> 时间</label>
+        <button class="btn" id="clearBtn" style="padding:7px 12px;font-size:12px">清空</button>
+      </div>
+      <div id="term" class="mono"><div class="sy">等待目标板数据…</div></div>
+      <div class="send-row">
+        <select id="newline" title="结尾换行">
+          <option value="0">无换行</option>
+          <option value="1" selected>LF</option>
+          <option value="2">CR</option>
+          <option value="3">CRLF</option>
+        </select>
+        <input id="sendText" placeholder="输入要发送的内容，回车发送" autocomplete="off">
+        <button class="btn primary" id="sendBtn">发送</button>
+      </div>
+      <div class="hint">绿色 RX = 目标板发来的数据；黄色 TX = 你发出的数据。勾选 HEX 后按十六进制显示和发送。</div>
+    </div>
+  </div>
+
+  <!-- ============ 页面 2：设备状态 ============ -->
+  <div class="page" id="page-status">
+
+    <div class="card">
+      <h2>无线连接</h2>
+      <div class="sub">设备当前的 WiFi 工作状态</div>
+      <div class="kv"><span class="k">状态</span><span class="v" id="sWifi">--</span></div>
+      <div class="kv"><span class="k">网络名称</span><span class="v" id="sSsid">--</span></div>
+      <div class="kv"><span class="k">信号强度</span><span class="v" id="sRssi">--</span></div>
+      <div class="kv"><span class="k">IP 地址</span><span class="v mono" id="sIp">--</span></div>
+    </div>
+
+    <div class="card">
+      <h2>运行信息</h2>
+      <div class="kv"><span class="k">已运行</span><span class="v" id="sUptime">--</span></div>
+      <div class="kv"><span class="k">TCP 客户端</span><span class="v" id="sTcp">--</span></div>
+      <div class="kv"><span class="k">串口波特率</span><span class="v mono" id="sBaud">--</span></div>
+      <div class="kv"><span class="k">串口接收 RX</span><span class="v mono good" id="sRx">--</span></div>
+      <div class="kv"><span class="k">串口发送 TX</span><span class="v mono hot" id="sTx">--</span></div>
+      <div class="kv"><span class="k">本次开机原因</span><span class="v" id="sRst">--</span></div>
+    </div>
+
+    <div class="card">
+      <h2>USB-C 接口状态</h2>
+      <div class="sub">当前 USB 口扮演的角色，以及调试探针的通信计数</div>
+      <div class="kv"><span class="k">当前角色</span><span class="v" id="sUsb">--</span></div>
+      <div id="usbExtra"></div>
+    </div>
+
+    <div class="card">
+      <h2>OLED 屏幕远程预览</h2>
+      <div class="sub">实时显示板子屏幕内容，也可以远程按实体键</div>
+      <div class="lcd-wrap"><canvas id="lcdCv"></canvas></div>
+      <div class="lcd-btns">
+        <button class="btn" id="b1">SW1 上</button>
+        <button class="btn primary" id="b2">SW2 选择</button>
+        <button class="btn" id="b3">SW3 下</button>
+      </div>
+      <div class="hint">SW1 = 向上，SW3 = 向下，SW2 = 确认；SW2 按住不放 = 从任意位置回到主屏。</div>
+      <div class="kv" style="margin-top:8px"><span class="k">当前菜单</span><span class="v mono" id="sMenu">--</span></div>
+    </div>
+
+    <div class="card">
+      <h2>固件信息</h2>
+      <div class="kv"><span class="k">运行分区</span><span class="v mono" id="sSlot">--</span></div>
+      <div class="kv"><span class="k">OTA 状态</span><span class="v" id="sOta">--</span></div>
+    </div>
+  </div>
+
+  <!-- ============ 页面 3：总线工具 ============ -->
+  <div class="page" id="page-bus">
+    <div class="card">
+      <div class="subtabs">
+        <button class="on" data-bus="pwm">PWM</button>
+        <button data-bus="spi">SPI</button>
+        <button data-bus="i2c">I2C</button>
+      </div>
+
+      <!-- PWM -->
+      <div class="bus-pane" id="bus-pwm">
+        <h2>PWM 测量 / 输出</h2>
+        <div class="sub">测量引脚上信号的频率和占空比，也可以让板子自己输出一路 PWM</div>
+        <div class="kv"><span class="k">测量频率</span><span class="v mono good" id="pwmFreq">--</span></div>
+        <div class="kv"><span class="k">测量占空比</span><span class="v mono" id="pwmDuty">--</span></div>
+        <canvas class="wave" id="pwmWave"></canvas>
+        <div class="field"><label>输出频率 (Hz)</label><input id="pwmOFreq" type="number" value="1000"></div>
+        <div class="field"><label>输出占空比 (%)</label><input id="pwmODuty" type="number" value="50" min="0" max="100"></div>
+        <div class="row">
+          <button class="btn ok" id="pwmStart">开始输出</button>
+          <button class="btn" id="pwmStop">停止输出</button>
+        </div>
+        <div class="result" id="pwmResult"></div>
+      </div>
+
+      <!-- SPI -->
+      <div class="bus-pane" id="bus-spi" style="display:none">
+        <h2>SPI 抓包 / 发送</h2>
+        <div class="sub">默认作从机抓总线上的数据；点「发送」时自动切为主机主动读写</div>
+        <div class="kv"><span class="k">抓包状态</span><span class="v" id="spiState">--</span></div>
+        <div class="kv"><span class="k">引脚映射</span><span class="v mono" id="spiPins" style="font-size:11px">--</span></div>
+        <div class="txn-log" id="spiLog"><div style="color:#5d687c">（暂无 SPI 事务）</div></div>
+        <canvas class="wave" id="spiWave"></canvas>
+        <div class="field"><label>发送数据（HEX，如 AA 55 01）</label><input id="spiHex" placeholder="AA5501"></div>
+        <div class="row">
+          <select id="spiMode" class="keep" style="flex:1">
+            <option value="0">Mode 0</option><option value="1">Mode 1</option>
+            <option value="2">Mode 2</option><option value="3">Mode 3</option>
+          </select>
+          <select id="spiClk" style="flex:1">
+            <option value="100000">100 kHz</option>
+            <option value="500000" selected>500 kHz</option>
+            <option value="1000000">1 MHz</option>
+            <option value="4000000">4 MHz</option>
+            <option value="8000000">8 MHz</option>
+          </select>
+        </div>
+        <button class="btn primary block" id="spiSend">发送并读取 MISO</button>
+        <div class="result" id="spiResult"></div>
+      </div>
+
+      <!-- I2C -->
+      <div class="bus-pane" id="bus-i2c" style="display:none">
+        <h2>I2C 抓包 / 收发</h2>
+        <div class="sub">抓取 I2C 总线上的读写事务，也可以作为主机主动读写从机</div>
+        <div class="kv"><span class="k">抓包状态</span><span class="v" id="i2cState">--</span></div>
+        <div class="txn-log" id="i2cLog"><div style="color:#5d687c">（暂无 I2C 事务）</div></div>
+        <div class="field"><label>从机地址（十六进制，如 50 表示 0x50）</label><input id="i2cAddr" placeholder="50"></div>
+        <div class="field"><label>数据（HEX，写操作时使用）</label><input id="i2cHex" placeholder="00 01 02"></div>
+        <div class="row">
+          <select id="i2cMode" class="keep" style="flex:1">
+            <option value="w">写 W</option>
+            <option value="r">读 R</option>
+            <option value="wr">写后读 WR</option>
+          </select>
+          <input id="i2cLen" type="number" value="1" min="1" placeholder="读取字节数" style="flex:1" title="读取字节数">
+        </div>
+        <button class="btn primary block" id="i2cSend">执行</button>
+        <div class="result" id="i2cResult"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 页面 4：系统设置 ============ -->
+  <div class="page" id="page-system">
+
+    <div class="card">
+      <h2>USB-C 角色切换</h2>
+      <div class="sub">一个 USB 口同一时间只能做一件事，选择会被保存</div>
+      <div class="seg" id="usbSeg">
+        <button data-m="off">关闭<small>给本板刷固件</small></button>
+        <button data-m="dap">CMSIS-DAP<small>Keil/pyOCD 调试</small></button>
+        <button data-m="ttl">USB-TTL<small>给目标板下载</small></button>
+      </div>
+      <div class="hint">off：USB 口用于给 NexLink 自身刷固件；dap：无线/USB 调试探针；ttl：虚拟串口连目标板。dap 与 ttl 之间切换后设备会自动重启。</div>
+    </div>
+
+    <div class="card">
+      <h2>目标板控制</h2>
+      <div class="sub">通过排针上的 NRST（IO12）控制目标板复位</div>
+      <div class="row">
+        <button class="btn" id="dutReset">复位目标板</button>
+        <button class="btn ok" id="dutBoot">复位并进入下载模式</button>
+      </div>
+      <div class="hint">「下载模式」会同时拉低 BOOT：需要先把一个拓展 IO 设为 GPIO 协议并接到目标板的 BOOT/IO0。</div>
+    </div>
+
+    <div class="card">
+      <h2>WiFi 配网</h2>
+      <div class="sub">让 NexLink 连接到你的 WiFi 路由器</div>
+      <button class="btn block" id="wifiScan" style="margin-top:0">扫描附近 WiFi</button>
+      <div class="wifi-list" id="wifiList"></div>
+      <div class="field"><label>WiFi 名称 SSID</label><input id="wifiSsid"></div>
+      <div class="field"><label>WiFi 密码</label><input id="wifiPass" type="password"></div>
+      <button class="btn primary block" id="wifiConnect">连接</button>
+    </div>
+
+    <div class="card">
+      <h2>固件无线升级（OTA）</h2>
+      <div class="sub">选择新的 nexlink.bin，上传后自动重启；刷坏会自动回滚</div>
+      <input type="file" id="otaFile" accept=".bin">
+      <div class="progress"><i id="otaBar"></i></div>
+      <button class="btn primary block" id="otaBtn">刷入固件</button>
+      <div class="result" id="otaResult"></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- 底部导航 -->
+<nav class="tabbar">
+  <button class="on" data-page="serial">
+    <svg viewBox="0 0 24 24"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg>串口
+  </button>
+  <button data-page="status">
+    <svg viewBox="0 0 24 24"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg>状态
+  </button>
+  <button data-page="bus">
+    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M17.5 14v7M14 17.5h7"/></svg>总线
+  </button>
+  <button data-page="system">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9c.2.47.64.8 1.15 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.51 1z"/></svg>系统
+  </button>
+</nav>
+
+<div id="toasts"></div>
+
+<script>
+"use strict";
+var $ = function (id) { return document.getElementById(id); };
+var S = null;                 // 最近一次 /api/status
+var curPage = "serial", curBus = "pwm";
+var enc = new TextEncoder();
+
+/* ---------------- Toast ---------------- */
+function toast(msg, type) {
+    var d = document.createElement("div");
+    d.className = "toast" + (type ? " " + type : "");
+    d.textContent = msg;
+    $("toasts").appendChild(d);
+    setTimeout(function () { d.style.opacity = "0"; d.style.transition = "opacity .3s"; }, 2200);
+    setTimeout(function () { d.remove(); }, 2600);
+}
+
+/* ---------------- 页面 / 子标签切换 ---------------- */
+document.querySelectorAll(".tabbar button").forEach(function (b) {
+    b.onclick = function () { goPage(b.dataset.page); };
+});
+function goPage(p) {
+    curPage = p;
+    document.querySelectorAll(".tabbar button").forEach(function (b) {
+        b.classList.toggle("on", b.dataset.page === p);
+    });
+    document.querySelectorAll(".page").forEach(function (pg) {
+        pg.classList.toggle("on", pg.id === "page-" + p);
+    });
+}
+document.querySelectorAll(".subtabs button").forEach(function (b) {
+    b.onclick = function () {
+        curBus = b.dataset.bus;
+        document.querySelectorAll(".subtabs button").forEach(function (x) {
+            x.classList.toggle("on", x === b);
+        });
+        ["pwm", "spi", "i2c"].forEach(function (n) {
+            $("bus-" + n).style.display = n === curBus ? "" : "none";
+        });
+    };
+});
+
+/* ---------------- 工具函数 ---------------- */
+function fmtUptime(s) {
+    s = Number(s) || 0;
+    var d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600),
+        m = Math.floor(s % 3600 / 60), ss = s % 60;
+    if (d) return d + " 天 " + h + " 小时";
+    if (h) return h + " 小时 " + m + " 分";
+    if (m) return m + " 分 " + ss + " 秒";
+    return ss + " 秒";
+}
+function sigText(rssi) {
+    if (!rssi) return "--";
+    var q = rssi >= -55 ? "强" : rssi >= -70 ? "中" : "弱";
+    return rssi + " dBm（" + q + "）";
+}
+function hex2(u) {
+    var s = "";
+    for (var i = 0; i < u.length; i++) s += ("0" + u[i].toString(16)).slice(-2).toUpperCase() + " ";
+    return s.trim();
+}
+function nowTs() {
+    var d = new Date(), p = function (n, l) { return String(n).padStart(l || 2, "0"); };
+    return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+}
+
+/* ---------------- 串口终端 ---------------- */
+var term = $("term"), firstLine = true;
+function addTerm(cls, text) {
+    if (firstLine) { term.innerHTML = ""; firstLine = false; }
+    var d = document.createElement("div");
+    d.className = cls;
+    if ($("tsMode").checked) {
+        var t = document.createElement("span");
+        t.className = "ts";
+        t.textContent = nowTs() + " ";
+        d.appendChild(t);
+    }
+    d.appendChild(document.createTextNode(text));
+    term.appendChild(d);
+    while (term.childNodes.length > 400) term.removeChild(term.firstChild);
+    term.scrollTop = term.scrollHeight;
+}
+function pollData() {
+    fetch("/api/data").then(function (r) { return r.text(); }).then(function (t) {
+        if (!t.length) return;
+        if ($("hexMode").checked) {
+            var bytes = [];
+            for (var i = 0; i < t.length; i++) bytes.push(t.charCodeAt(i) & 0xff);
+            addTerm("rx", "RX  " + hex2(bytes));
+        } else {
+            addTerm("rx", "RX  " + t.replace(/\s+$/, ""));
+        }
+    }).catch(function () {});
+}
+function doSend() {
+    var t = $("sendText").value;
+    if (!t) return;
+    var payload;
+    if ($("hexMode").checked) {
+        var h = t.replace(/[^0-9a-fA-F]/g, "");
+        if (h.length % 2) { toast("HEX 长度必须为偶数", "err"); return; }
+        payload = new Uint8Array(h.length / 2);
+        for (var i = 0; i < h.length; i += 2) payload[i / 2] = parseInt(h.substr(i, 2), 16);
+        addTerm("tx", "TX  " + hex2(payload));
+    } else {
+        var nl = $("newline").value;
+        if (nl === "1") t += "\n";
+        else if (nl === "2") t += "\r";
+        else if (nl === "3") t += "\r\n";
+        payload = enc.encode(t);
+        addTerm("tx", "TX  " + t.replace(/[\r\n]+$/, ""));
+    }
+    fetch("/api/send", { method: "POST", headers: { "Content-Type": "text/plain" }, body: payload })
+        .catch(function () { toast("发送失败", "err"); });
+    $("sendText").value = "";
+}
+$("sendBtn").onclick = doSend;
+$("sendText").addEventListener("keydown", function (e) { if (e.key === "Enter") doSend(); });
+$("clearBtn").onclick = function () {
+    term.innerHTML = ""; firstLine = true;
+    addTerm("sy", "（已清空）");
+};
+$("baud").onchange = function () {
+    fetch("/api/baud?b=" + $("baud").value).then(function () {
+        toast("波特率已切换为 " + $("baud").value);
+    }).catch(function () { toast("切换失败", "err"); });
+};
+
+/* ---------------- 状态轮询 ---------------- */
+var missCount = 0;
+function pollStatus() {
+    fetch("/api/status").then(function (r) { return r.json(); }).then(function (d) {
+        S = d; missCount = 0;
+        renderTop(d); renderStatus(d);
+    }).catch(function () {
+        missCount++;
+        $("topBadge").className = "badge err";
+        $("topBadge").textContent = "离线 · 重连中";
+        if (missCount >= 2 && curPage === "status")
+            $("sWifi").innerHTML = '<span class="bad">连不上设备</span>';
+    });
+}
+function wifiLabel(d) {
+    if (d.wifi === "connected") return ["ok", "已连接路由器"];
+    if (d.wifi === "ap") return ["warn", "AP 热点模式"];
+    return ["err", "未连接"];
+}
+function renderTop(d) {
+    var w = wifiLabel(d);
+    $("topBadge").className = "badge " + w[0];
+    $("topBadge").textContent = w[1];
+}
+function usbDesc(m) {
+    return m === "dap" ? "CMSIS-DAP 调试探针" : m === "ttl" ? "USB-TTL 虚拟串口" : "关闭";
+}
+function renderStatus(d) {
+    var w = wifiLabel(d);
+    $("sWifi").innerHTML = '<span class="' + (w[0] === "ok" ? "good" : w[0] === "warn" ? "hot" : "bad") + '">' + w[1] + "</span>";
+    $("sSsid").textContent = d.ssid && d.ssid !== "-" ? d.ssid : "--";
+    $("sRssi").textContent = d.wifi === "connected" ? sigText(d.rssi) : "--";
+    $("sIp").textContent = d.ip || "--";
+    $("sUptime").textContent = fmtUptime(d.uptime);
+    $("sTcp").textContent = d.tcp + " 个连接";
+    $("sBaud").textContent = d.baud;
+    $("sRx").textContent = d.rx;
+    $("sTx").textContent = d.tx;
+    $("sRst").textContent = d.rst;
+    $("sUsb").textContent = usbDesc(d.usbmode);
+    $("sMenu").textContent = d.menu || "--";
+    $("sSlot").textContent = d.slot;
+    $("sOta").textContent = d.ota === "pending" ? "待确认（异常将回滚）" : "正常";
+
+    // USB 详细计数
+    var html = "";
+    if (d.usbmode === "dap") {
+        html =
+            kv("主机已配置", d.dapcfg ? '<span class="good">是 (' + d.dapcfg + ')</span>' : '<span class="hot">否</span>') +
+            kv("DAP 命令包", d.daprx) + kv("DAP 响应包", d.daptx);
+    } else if (d.usbmode === "ttl") {
+        html = kv("发往目标", d.ttl_to_dut) + kv("发往主机", d.ttl_to_host);
+    }
+    if (d.debug) {
+        html += kv("探针占用 IO", '<span class="hot">' + (d.debug_io || "--") + "</span>");
+    }
+    $("usbExtra").innerHTML = html;
+
+    // 波特率下拉与 USB 分段保持同步
+    var baudSel = $("baud");
+    if (document.activeElement !== baudSel) baudSel.value = String(d.baud);
+    document.querySelectorAll("#usbSeg button").forEach(function (b) {
+        b.classList.toggle("on", b.dataset.m === d.usbmode);
+    });
+}
+function kv(k, v) {
+    return '<div class="kv"><span class="k">' + k + '</span><span class="v mono">' + v + "</span></div>";
+}
+
+/* ---------------- OLED 预览 ---------------- */
+var lcdCv = $("lcdCv"), lctx = lcdCv.getContext("2d");
+var offCv = document.createElement("canvas");
+offCv.width = 128; offCv.height = 64;
+var offCtx = offCv.getContext("2d");
+var lcdImg = offCtx.createImageData(128, 64);
+function sizeLcd() {
+    var dpr = window.devicePixelRatio || 1, w = lcdCv.clientWidth || 320;
+    lcdCv.width = Math.round(w * dpr);
+    lcdCv.height = Math.round(w * dpr * 64 / 128);
+}
+sizeLcd(); window.addEventListener("resize", sizeLcd);
+function pollLcd() {
+    if (curPage !== "status") return;
+    fetch("/api/lcd").then(function (r) { return r.arrayBuffer(); }).then(function (ab) {
+        var u = new Uint8Array(ab), d = lcdImg.data;
+        for (var pg = 0; pg < 8; pg++) {
+            for (var x = 0; x < 128; x++) {
+                var b = u[pg * 128 + x] || 0;
+                for (var bit = 0; bit < 8; bit++) {
+                    var j = ((pg * 8 + bit) * 128 + x) * 4;
+                    var c = ((b >> bit) & 1) ? 255 : 0;
+                    d[j] = c; d[j + 1] = c; d[j + 2] = c; d[j + 3] = 255;
+                }
+            }
+        }
+        offCtx.putImageData(lcdImg, 0, 0);
+        lctx.setTransform(lcdCv.width / 128, 0, 0, lcdCv.height / 64, 0, 0);
+        lctx.imageSmoothingEnabled = false;
+        lctx.clearRect(0, 0, 128, 64);
+        lctx.drawImage(offCv, 0, 0);
+    }).catch(function () {});
+}
+
+/* OLED 按键（含长按） */
+function bindBtn(el, b) {
+    var timer = null, longFired = false;
+    el.addEventListener("mousedown", start);
+    el.addEventListener("touchstart", function (e) { e.preventDefault(); start(); }, { passive: false });
+    function start() {
+        longFired = false;
+        timer = setTimeout(function () {
+            longFired = true; timer = null;
+            fetch("/api/btn?b=" + b + "&a=long");
+        }, 550);
+    }
+    function end() {
+        if (timer) { clearTimeout(timer); timer = null; }
+        if (!longFired) fetch("/api/btn?b=" + b + "&a=press");
+    }
+    el.addEventListener("mouseup", end);
+    el.addEventListener("mouseleave", function () { if (timer) { clearTimeout(timer); timer = null; } });
+    el.addEventListener("touchend", function (e) { e.preventDefault(); end(); }, { passive: false });
+}
+bindBtn($("b1"), 1); bindBtn($("b2"), 2); bindBtn($("b3"), 3);
+
+/* ---------------- USB 角色 / 目标复位 ---------------- */
+document.querySelectorAll("#usbSeg button").forEach(function (b) {
+    b.onclick = function () {
+        var m = b.dataset.m;
+        if (S && S.usbmode === m) return;
+        if (!confirm("切换 USB 角色为「" + usbDesc(m) + "」？\ndap 与 ttl 之间切换设备会自动重启。")) return;
+        fetch("/api/usb_mode?m=" + m).then(function (r) { return r.json(); }).then(function (d) {
+            if (d.reboot) toast("设备正在重启…", "ok");
+            setTimeout(pollStatus, 2000);
+        }).catch(function () { toast("切换失败", "err"); });
+    };
+});
+$("dutReset").onclick = function () {
+    fetch("/api/dut/reset?ms=25").then(function (r) { return r.json(); }).then(function () {
+        toast("目标板已复位", "ok");
+    }).catch(function () { toast("复位失败", "err"); });
+};
+$("dutBoot").onclick = function () {
+    fetch("/api/dut/reset?ms=25&boot=1").then(function (r) { return r.json(); }).then(function () {
+        toast("目标板已进入下载模式", "ok");
+    }).catch(function () { toast("操作失败", "err"); });
+};
+
+/* ---------------- WiFi 配网 ---------------- */
+$("wifiScan").onclick = function () {
+    var box = $("wifiList");
+    box.innerHTML = '<button disabled>扫描中…</button>';
+    fetch("/api/wifi").then(function (r) { return r.json(); }).then(function (list) {
+        box.innerHTML = "";
+        if (!list || !list.length) { box.innerHTML = '<button disabled>没有发现网络</button>'; return; }
+        list.forEach(function (a) {
+            var b = document.createElement("button");
+            b.className = "btn";
+            b.innerHTML = "<span>" + (a.ssid || "(隐藏网络)") + '</span><span class="sig">' + a.rssi + " dBm</span>";
+            b.onclick = function () { $("wifiSsid").value = a.ssid || ""; };
+            box.appendChild(b);
+        });
+    }).catch(function () { box.innerHTML = '<button disabled>扫描失败</button>'; });
+};
+$("wifiConnect").onclick = function () {
+    var s = $("wifiSsid").value;
+    if (!s) { toast("请填写 WiFi 名称", "err"); return; }
+    var body = "ssid=" + encodeURIComponent(s) + "&pass=" + encodeURIComponent($("wifiPass").value);
+    fetch("/api/wifi", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body
+    }).then(function () { toast("正在连接，稍后查看状态页", "ok"); })
+      .catch(function () { toast("提交失败", "err"); });
+};
+
+/* ---------------- OTA ---------------- */
+$("otaBtn").onclick = function () {
+    var f = $("otaFile").files[0];
+    if (!f) { toast("请先选择 .bin 固件文件", "err"); return; }
+    if (!confirm("确定刷入 " + f.name + " ？\n刷入后设备自动重启，失败会自动回滚。")) return;
+    var bar = $("otaBar"), res = $("otaResult");
+    res.className = "result"; res.textContent = "上传中 0%";
+    var x = new XMLHttpRequest();
+    x.open("POST", "/api/ota");
+    x.upload.onprogress = function (e) {
+        if (e.lengthComputable) {
+            var p = Math.round(e.loaded / e.total * 100);
+            bar.style.width = p + "%";
+            res.textContent = "上传中 " + p + "%";
+        }
+    };
+    x.onload = function () {
+        bar.style.width = "100%";
+        res.className = "result ok";
+        res.textContent = "HTTP " + x.status + "，设备正在重启…";
+    };
+    x.onerror = function () {
+        res.className = "result";
+        res.textContent = "连接已断开（设备可能正在重启），请稍后查看状态页";
+    };
+    x.send(f);
+};
+
+/* ---------------- 总线：PWM ---------------- */
+function sizeWave(cv) {
+    var dpr = window.devicePixelRatio || 1;
+    cv.width = Math.round(cv.clientWidth * dpr);
+    cv.height = Math.round(cv.clientHeight * dpr);
+}
+function drawPwmWave(duty) {
+    var cv = $("pwmWave"); sizeWave(cv);
+    var x = cv.getContext("2d"), W = cv.width, H = cv.height, dpr = window.devicePixelRatio || 1;
+    x.fillStyle = "#070b11"; x.fillRect(0, 0, W, H);
+    x.strokeStyle = "#223044"; x.beginPath();
+    x.moveTo(0, H / 2); x.lineTo(W, H / 2); x.stroke();
+    var cycles = 10, cw = W / cycles, top = 6 * dpr, bot = H - 6 * dpr, hi = cw * Math.max(0, Math.min(1, duty));
+    x.strokeStyle = "#34d399"; x.lineWidth = Math.max(1.5, dpr);
+    x.beginPath(); x.moveTo(0, bot);
+    for (var i = 0; i < cycles; i++) {
+        var px = i * cw;
+        x.lineTo(px, top); x.lineTo(px + hi, top);
+        x.lineTo(px + hi, bot); x.lineTo(px + cw, bot);
+    }
+    x.stroke();
+}
+function pollPwm() {
+    fetch("/api/pwm").then(function (r) { return r.json(); }).then(function (d) {
+        $("pwmFreq").textContent = Number(d.freq).toFixed(2) + " Hz";
+        $("pwmDuty").textContent = Number(d.duty).toFixed(1) + " %";
+        drawPwmWave(Number(d.duty) / 100);
+    }).catch(function () {});
+}
+function pwmOut(en) {
+    var body = "freq=" + $("pwmOFreq").value + "&duty=" + $("pwmODuty").value + "&enable=" + en;
+    fetch("/api/pwm/out", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body
+    }).then(function (r) { return r.json(); }).then(function (d) {
+        var res = $("pwmResult");
+        res.className = "result ok";
+        res.textContent = d.running ? "正在输出 " + Math.round(d.freq) + " Hz，占空比 " + Math.round(d.duty) + "%" : "已停止输出";
+    }).catch(function () {
+        var res = $("pwmResult"); res.className = "result err"; res.textContent = "操作失败";
+    });
+}
+$("pwmStart").onclick = function () { pwmOut(1); };
+$("pwmStop").onclick = function () { pwmOut(0); };
+
+/* ---------------- 总线：SPI ---------------- */
+function drawSpiWave(tx, rx) {
+    var cv = $("spiWave"); sizeWave(cv);
+    var x = cv.getContext("2d"), W = cv.width, H = cv.height, dpr = window.devicePixelRatio || 1;
+    x.fillStyle = "#070b11"; x.fillRect(0, 0, W, H);
+    if (!tx || !tx.length) {
+        x.fillStyle = "#5d687c"; x.font = 11 * dpr + "px monospace";
+        x.fillText("（暂无 SPI 事务）", 10 * dpr, H / 2);
+        return;
+    }
+    var bytes = Math.min(tx.length, 4), bits = bytes * 8, bw = W / bits;
+    var sy = H * 0.28, my = H * 0.72, amp = H * 0.13;
+    x.strokeStyle = "#34d399"; x.lineWidth = Math.max(1, dpr);
+    x.beginPath(); x.moveTo(0, sy + amp);
+    for (var i = 0; i < bits; i++) {
+        var px = i * bw, x2 = Math.min(px + bw, W);
+        x.lineTo(px, sy + amp); x.lineTo(px, sy - amp);
+        x.lineTo(x2, sy - amp); x.lineTo(x2, sy + amp);
+    }
+    x.stroke();
+    x.fillStyle = "#34d399"; x.font = 9 * dpr + "px monospace";
+    x.fillText("MOSI", 4 * dpr, sy - amp - 2 * dpr);
+    x.strokeStyle = "#fbbf24"; x.beginPath();
+    var lvl = my + amp; x.moveTo(0, lvl);
+    for (var j = 0; j < bits; j++) {
+        var bi = Math.floor(j / 8), bk = 7 - (j % 8);
+        var bit = (rx && rx[bi] != null) ? (rx[bi] >> bk) & 1 : 0;
+        var tg = bit ? my - amp : my + amp, qx = j * bw, q2 = Math.min(qx + bw, W);
+        x.lineTo(qx, lvl); x.lineTo(qx, tg); lvl = tg;
+        x.lineTo(q2, tg);
+    }
+    x.stroke();
+    x.fillStyle = "#fbbf24";
+    x.fillText("MISO", 4 * dpr, my + amp + 11 * dpr);
+}
+function pollSpi() {
+    fetch("/api/spi").then(function (r) { return r.json(); }).then(function (d) {
+        $("spiState").textContent = d.running ? "抓包中 · " + d.count + " 个事务" : "未启动";
+        fetch("/api/pins").then(function (r) { return r.json(); }).then(function (p) {
+            var m = {};
+            for (var i = 0; i < p.order.length; i++) m[p.order[i]] = p.pos_io[i];
+            $("spiPins").textContent = "SCK=" + (m.SCK || "?") + " MOSI=" + (m.MOSI || "?") +
+                " MISO=" + (m.MISO || "?") + " CS=" + (m.CS || "-");
+        }).catch(function () {});
+        var log = $("spiLog"); log.innerHTML = "";
+        if (d.history && d.history.length) {
+            var h = d.history;
+            for (var i = Math.max(0, h.length - 6); i < h.length; i++) {
+                var t = h[i];
+                var a = document.createElement("div"); a.className = "mosi";
+                a.textContent = ">> " + hex2(t.mosi);
+                var b = document.createElement("div"); b.className = "miso";
+                b.textContent = "<< " + hex2(t.miso);
+                log.appendChild(a); log.appendChild(b);
+            }
+            log.scrollTop = log.scrollHeight;
+            drawSpiWave(h[h.length - 1].mosi, h[h.length - 1].miso);
+        } else {
+            log.innerHTML = '<div style="color:#5d687c">（暂无 SPI 事务）</div>';
+            drawSpiWave(null, null);
+        }
+    }).catch(function () {});
+}
+$("spiSend").onclick = function () {
+    var h = $("spiHex").value.replace(/[^0-9a-fA-F]/g, "");
+    var res = $("spiResult");
+    if (!h) { res.className = "result err"; res.textContent = "请输入要发送的 HEX 数据"; return; }
+    if (h.length % 2) { res.className = "result err"; res.textContent = "HEX 长度必须为偶数"; return; }
+    var body = "hex=" + h + "&mode=" + $("spiMode").value + "&clk=" + $("spiClk").value;
+    fetch("/api/spi/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body
+    }).then(function (r) { return r.json(); }).then(function (d) {
+        res.className = "result " + (d.ok ? "ok" : "err");
+        res.textContent = d.ok ? "MISO 返回：" + hex2(d.rx) : "错误：" + (d.err || JSON.stringify(d));
+    }).catch(function (e) {
+        res.className = "result err"; res.textContent = "请求失败：" + e;
+    });
+};
+
+/* ---------------- 总线：I2C ---------------- */
+function pollI2c() {
+    fetch("/api/i2c").then(function (r) { return r.json(); }).then(function (d) {
+        $("i2cState").textContent = d.running ? "抓包中 · " + d.count + " 个事务" : "未启动";
+        var log = $("i2cLog"); log.innerHTML = "";
+        if (d.history && d.history.length) {
+            var h = d.history;
+            for (var i = Math.max(0, h.length - 8); i < h.length; i++) {
+                var t = h[i];
+                var a = document.createElement("div");
+                a.className = t.read ? "i2cr" : "i2cw";
+                var addr = ("0" + t.addr.toString(16)).slice(-2).toUpperCase();
+                a.textContent = "0x" + addr + (t.read ? "R " : "W ") + hex2(t.data);
+                log.appendChild(a);
+            }
+            log.scrollTop = log.scrollHeight;
+        } else {
+            log.innerHTML = '<div style="color:#5d687c">（暂无 I2C 事务）</div>';
+        }
+    }).catch(function () {});
+}
+$("i2cSend").onclick = function () {
+    var res = $("i2cResult");
+    var body = "addr=" + encodeURIComponent($("i2cAddr").value) +
+        "&hex=" + $("i2cHex").value.replace(/\s/g, "") +
+        "&mode=" + $("i2cMode").value + "&len=" + $("i2cLen").value;
+    fetch("/api/i2c/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body
+    }).then(function (r) { return r.json(); }).then(function (d) {
+        res.className = "result " + (d.ok ? "ok" : "err");
+        res.textContent = d.ok
+            ? (d.rx && d.rx.length ? "读到数据：" + hex2(d.rx) : "写入成功")
+            : "错误：" + d.err;
+    }).catch(function () {
+        res.className = "result err"; res.textContent = "请求失败";
+    });
+};
+
+/* ---------------- 轮询调度 ---------------- */
+function pollBus() {
+    if (curPage !== "bus") return;
+    if (curBus === "pwm") pollPwm();
+    else if (curBus === "spi") pollSpi();
+    else pollI2c();
+}
+drawPwmWave(0);
+drawSpiWave(null, null);
+pollStatus();
+setInterval(pollStatus, 2000);
+setInterval(pollData, 200);
+setInterval(pollLcd, 1500);
+setInterval(pollBus, 1000);
+</script>
+</body>
+</html>

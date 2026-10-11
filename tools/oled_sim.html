@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OLED 界面模拟器 - SSD1306 128x64</title>
+<script src="ascii_font.js"></script>
+<script src="cjk_font.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; padding: 24px; }
+  h1 { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+  .sub { font-size: 13px; color: #8b949e; margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 20px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 16px; }
+  .card h3 { font-size: 14px; font-weight: 600; margin-bottom: 3px; }
+  .card .desc { font-size: 12px; color: #8b949e; margin-bottom: 12px; }
+  .oled-wrap { background: #05070d; border-radius: 8px; padding: 10px; display: flex; justify-content: center; }
+  canvas { width: 384px; height: 192px; image-rendering: pixelated; image-rendering: crisp-edges; border-radius: 4px; }
+  .tag { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 10px; background: #1f6feb22; color: #58a6ff; margin-left: 6px; }
+</style>
+</head>
+<body>
+<h1>SSD1306 OLED 界面模拟器</h1>
+<div class="sub">固件真实点阵（ASCII = VGA 8x16，中文 = SimSun 16px 内嵌点阵），放大 3 倍。布局与 main/display/dash_ui.c 完全一致：英文专业标题 + 两行数据 + 底部高亮动作条（即 SW2 的作用，不再印 SW2 字样）。</div>
+<div class="grid" id="grid"></div>
+
+<script>
+var W = 128, H = 64;
+
+/* ---- virtual framebuffer (SSD1306 page layout) ---- */
+function newFB() { return new Uint8Array(1024); }
+function px(fb, x, y, on) {
+  if (x < 0 || x >= W || y < 0 || y >= H) return;
+  var i = (y >> 3) * W + x, b = 1 << (y & 7);
+  if (on) fb[i] |= b; else fb[i] &= ~b;
+}
+function fillRect(fb, x, y, w, h, on) {
+  for (var j = 0; j < h; j++) for (var i = 0; i < w; i++) px(fb, x + i, y + j, on);
+}
+function hline(fb, x, y, w, on) { for (var i = 0; i < w; i++) px(fb, x + i, y, on); }
+function rect(fb, x, y, w, h, on) {
+  hline(fb, x, y, w, on); hline(fb, x, y + h - 1, w, on);
+  for (var j = 1; j < h - 1; j++) { px(fb, x, y + j, on); px(fb, x + w - 1, y + j, on); }
+}
+
+/* inv=true paints the whole cell lit with black glyph bits (inverse video) */
+function drawChar(fb, x, y, ch, inv) {
+  var code = ch.charCodeAt(0);
+  if (code < 0x20 || code > 0x7f) code = 0x20;
+  var g = ASCIIFONT[code - 0x20];
+  fillRect(fb, x, y, 8, 16, !!inv);
+  for (var row = 0; row < 16; row++)
+    for (var cx = 0; cx < 8; cx++)
+      if (g[row] & (1 << (7 - cx))) px(fb, x + cx, y + row, !inv);
+}
+function drawBitmap(fb, x, y, d, inv) {
+  fillRect(fb, x, y, 16, 16, !!inv);
+  for (var row = 0; row < 16; row++) {
+    var b0 = d[row * 2], b1 = d[row * 2 + 1];
+    for (var cx = 0; cx < 8; cx++) {
+      if (b0 & (1 << (7 - cx))) px(fb, x + cx, y + row, !inv);
+      if (b1 & (1 << (7 - cx))) px(fb, x + 8 + cx, y + row, !inv);
+    }
+  }
+}
+function mixWidth(s) {
+  var w = 0;
+  for (var i = 0; i < s.length; i++) w += s.charCodeAt(i) < 128 ? 8 : 16;
+  return w;
+}
+function drawMix(fb, x, y, s, inv) {
+  for (var i = 0; i < s.length; i++) {
+    var ch = s[i];
+    if (ch.charCodeAt(0) < 128) { drawChar(fb, x, y, ch, inv); x += 8; }
+    else { var g = CJKFONT[ch]; drawBitmap(fb, x, y, g || new Array(32).fill(0), inv); x += 16; }
+  }
+  return x;
+}
+/* ASCII glyph scaled 2x (16 wide, 32 tall) */
+function drawBig(fb, x, y, ch) {
+  var code = ch.charCodeAt(0);
+  if (code < 0x20 || code > 0x7e) return;
+  var g = ASCIIFONT[code - 0x20];
+  for (var r = 0; r < 16; r++)
+    for (var c = 0; c < 8; c++)
+      if (g[r] & (1 << (7 - c))) fillRect(fb, x + c * 2, y + r * 2, 2, 2, true);
+}
+
+/* ---- layout primitives (mirror dash_ui.c) ---- */
+function titleRow(fb, name, idx) {
+  fillRect(fb, 0, 0, W, 16, false);
+  drawMix(fb, 0, 0, name, false);
+  var p = idx + "/6";
+  for (var i = 0; i < p.length; i++) drawChar(fb, W - p.length * 8 + i * 8, 0, p[i], false);
+  hline(fb, 0, 15, W, true);
+}
+function contentRow(fb, y, s) {
+  fillRect(fb, 0, y, W, 16, false);
+  drawMix(fb, 0, y, s, false);
+}
+function actionBar(fb, text) {
+  var w = mixWidth(text), bw = Math.min(w + 10, W);
+  fillRect(fb, 0, 48, W, 16, false);
+  fillRect(fb, 0, 48, bw, 16, true);
+  drawMix(fb, 5, 48, text, true);
+}
+function toastRow(fb, s) {
+  fillRect(fb, 0, 48, W, 16, false);
+  drawMix(fb, 0, 48, s, false);
+}
+function sigBars(fb, x, rssi) {
+  var n = rssi >= -55 ? 5 : rssi >= -62 ? 4 : rssi >= -70 ? 3 : rssi >= -80 ? 2 : 1;
+  for (var i = 0; i < 5; i++) {
+    var hgt = 3 + i * 2;
+    if (i < n) fillRect(fb, x + i * 4, 16 + 14 - hgt, 2, hgt, true);
+  }
+}
+/* 1=DAP 2=TTL 0=OFF */
+function roleName(m) { return m === 1 ? "DAP" : m === 2 ? "TTL" : "OFF"; }
+function nextRole(m) { return (m + 1) % 3; }
+function idcodeRow(fb, y, id) { contentRow(fb, y, id != null ? "ID 0x" + id : "ID 无目标"); }
+
+var PINS = { swclk: 48, swdio: 47, nrst: 45 };
+
+/* ---- screen renderers (mirror dash_ui.c) ---- */
+function scrOverview(fb, st) {
+  titleRow(fb, "STATUS", 1);
+  if (st.wifi === "sta") {
+    contentRow(fb, 16, "WiFi 已连接");
+    sigBars(fb, 104, st.rssi);
+  } else if (st.wifi === "ap") contentRow(fb, 16, "WiFi 热点模式");
+  else if (st.wifi === "conn") contentRow(fb, 16, "WiFi 连接中");
+  else contentRow(fb, 16, "WiFi 未连接");
+  contentRow(fb, 32, "IP " + st.ip);
+  actionBar(fb, "> 重连 WiFi");
+}
+function scrSerial(fb, lines, hex) {
+  titleRow(fb, "UART", 2);
+  var ys = [16, 32];
+  if (!lines || !lines.length) {
+    contentRow(fb, ys[0], "等待数据...");
+    contentRow(fb, ys[1], "");
+  } else {
+    for (var i = 0; i < 2; i++) contentRow(fb, ys[i], lines[i] || "");
+  }
+  actionBar(fb, hex ? "> 切换为文本" : "> 切换为 HEX");
+}
+function scrSwd(fb, id) {
+  titleRow(fb, "SWD", 3);
+  contentRow(fb, 16, "SWD CLK" + PINS.swclk + " DIO" + PINS.swdio);
+  idcodeRow(fb, 32, id);
+  actionBar(fb, "> 读取 IDCODE");
+}
+function scrTarget(fb, id, toast) {
+  titleRow(fb, "TARGET", 4);
+  contentRow(fb, 16, "NRST IO" + PINS.nrst);
+  idcodeRow(fb, 32, id);
+  if (toast) toastRow(fb, toast); else actionBar(fb, "> 复位目标");
+}
+function scrPwm(fb, f, d, running) {
+  titleRow(fb, "PWM", 5);
+  if (f == null) contentRow(fb, 16, "频率 --");
+  else if (f >= 1000) contentRow(fb, 16, "频率 " + (f / 1000).toFixed(2) + " kHz");
+  else contentRow(fb, 16, "频率 " + Math.round(f) + " Hz");
+  contentRow(fb, 32, "占空 " + d.toFixed(1) + "%");
+  actionBar(fb, running ? "> 停止输出" : "> 输出 1kHz");
+}
+function scrUsb(fb, usb) {
+  titleRow(fb, "USB", 6);
+  contentRow(fb, 16, "角色 " + roleName(usb));
+  contentRow(fb, 32, "切换后重启");
+  actionBar(fb, "> 切换为 " + roleName(nextRole(usb)));
+}
+
+/* ---- boot animation frame (k chars shown 0..7, prog 0..1) ---- */
+function scrBoot(fb, k, prog) {
+  fillRect(fb, 0, 0, W, H, false);
+  var logo = "NexLink", gw = 16, gy = 12, gx = (W - logo.length * gw) / 2;
+  for (var i = 0; i < k; i++) drawBig(fb, gx + i * gw, gy, logo[i]);
+  if (k >= logo.length) {
+    var px2 = 8, py = 50, pw = 112, ph = 6;
+    rect(fb, px2, py, pw, ph, true);
+    if (prog > 0) fillRect(fb, px2 + 1, py + 1, Math.round((pw - 2) * prog), ph - 2, true);
+  }
+}
+
+/* ---- scenarios ---- */
+var scenarios = [
+  { t: "0. 开机动画 NexLink", d: "逐字打出 2x Logo + 进度条，约 1.4 秒（本卡片为实时循环动画）", boot: true },
+  { t: "1. STATUS（已连接）", d: "WiFi 状态 + 信号条 + IP；底部高亮条 = SW2 重连",
+    r: function (fb) { scrOverview(fb, { wifi: "sta", rssi: -58, ip: "10.1.27.33" }); } },
+  { t: "1b. STATUS（热点模式）", d: "没有路由器时自建热点",
+    r: function (fb) { scrOverview(fb, { wifi: "ap", ip: "192.168.4.1" }); } },
+  { t: "1c. STATUS（未连接）", d: "WiFi 连不上时",
+    r: function (fb) { scrOverview(fb, { wifi: "no", ip: "-" }); } },
+  { t: "2. UART（文本）", d: "最近 2 行数据；动作条提示 SW2 切到 HEX",
+    r: function (fb) { scrSerial(fb, ["AT+CSQ", "+CSQ: 24,99"], false); } },
+  { t: "2b. UART（HEX）", d: "HEX 模式；动作条提示切回文本",
+    r: function (fb) { scrSerial(fb, ["A1 B2 C3 0D 0A ", "7E 01 FF 80 42 "], true); } },
+  { t: "2c. UART（无数据）", d: "开机后还没收到数据",
+    r: function (fb) { scrSerial(fb, [], false); } },
+  { t: "3. SWD（识别到目标）", d: "CLK/DIO 引脚 + IDCODE；SW2 读取",
+    r: function (fb) { scrSwd(fb, "0BB11477"); } },
+  { t: "3b. SWD（无目标）", d: "没接目标或接线错误",
+    r: function (fb) { scrSwd(fb, null); } },
+  { t: "4. TARGET（目标控制）", d: "NRST 引脚 + IDCODE；SW2 复位目标",
+    r: function (fb) { scrTarget(fb, "0BB11477"); } },
+  { t: "4b. TARGET（按下后 toast）", d: "动作条临时变为结果提示",
+    r: function (fb) { scrTarget(fb, "0BB11477", "目标已复位"); } },
+  { t: "5. PWM（测到信号）", d: "频率自动 Hz/kHz；SW2 输出 1kHz",
+    r: function (fb) { scrPwm(fb, 1234, 50.0, false); } },
+  { t: "5b. PWM（无信号 / 输出中）", d: "无信号；输出开启后动作条变停止",
+    r: function (fb) { scrPwm(fb, null, 0, true); } },
+  { t: "6. USB（DAP）", d: "当前角色 DAP，SW2 切到 TTL（切换会重启）",
+    r: function (fb) { scrUsb(fb, 1); } },
+  { t: "6b. USB（TTL）", d: "当前 TTL，SW2 切到 OFF",
+    r: function (fb) { scrUsb(fb, 2); } },
+  { t: "6c. USB（OFF）", d: "USB 关闭，SW2 切到 DAP",
+    r: function (fb) { scrUsb(fb, 0); } },
+];
+
+/* ---- paint ---- */
+function paint(canvas, fb) {
+  canvas.width = W; canvas.height = H;
+  var ctx = canvas.getContext("2d");
+  var img = ctx.createImageData(W, H);
+  for (var y = 0; y < H; y++) for (var x = 0; x < W; x++) {
+    var on = fb[(y >> 3) * W + x] & (1 << (y & 7));
+    var i = (y * W + x) * 4;
+    if (on) { img.data[i] = 190; img.data[i + 1] = 210; img.data[i + 2] = 255; img.data[i + 3] = 255; }
+    else { img.data[i] = 6; img.data[i + 1] = 9; img.data[i + 2] = 18; img.data[i + 3] = 255; }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+var grid = document.getElementById("grid");
+var bootCanvas = null;
+scenarios.forEach(function (s) {
+  var card = document.createElement("div"); card.className = "card";
+  card.innerHTML = "<h3>" + s.t + "</h3><div class='desc'>" + s.d + "</div>" +
+    "<div class='oled-wrap'><canvas></canvas></div>";
+  grid.appendChild(card);
+  var canvas = card.querySelector("canvas");
+  if (s.boot) { bootCanvas = canvas; return; }
+  var fb = newFB();
+  s.r(fb);
+  paint(canvas, fb);
+});
+
+/* ---- animate the boot card on a loop ---- */
+if (bootCanvas) {
+  var t0 = performance.now();
+  var TYPE_MS = 90, BAR_MS = 440, HOLD_MS = 350, BLANK_MS = 300;
+  var CYCLE = 7 * TYPE_MS + BAR_MS + HOLD_MS + BLANK_MS;
+  function frame() {
+    var t = (performance.now() - t0) % CYCLE;
+    var fb = newFB(), k, prog = 0;
+    if (t < 7 * TYPE_MS) { k = Math.floor(t / TYPE_MS) + 1; }
+    else {
+      k = 7;
+      var bt = t - 7 * TYPE_MS;
+      if (bt < BAR_MS) prog = bt / BAR_MS;
+      else if (bt < BAR_MS + HOLD_MS) prog = 1;
+      else { paint(bootCanvas, fb); requestAnimationFrame(frame); return; }
+    }
+    scrBoot(fb, k, prog);
+    paint(bootCanvas, fb);
+    requestAnimationFrame(frame);
+  }
+  frame();
+}
+</script>
+</body>
+</html>
