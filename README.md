@@ -1,17 +1,15 @@
-<div align="center">
+<h1 align="center">⚡ NexLink</h1>
 
-# ⚡ NexLink
+<p align="center"><b>ESP32-S3 无线硬件调试器</b> —— 一块板子上同时具备 USB CMSIS-DAP 探针、无线串口桥、
+SPI/I2C/PWM 协议分析仪，以及让 AI 直接操控硬件的 MCP 接口。</p>
 
-**ESP32-S3 无线硬件调试器** —— 一块板子上同时具备 USB CMSIS-DAP 探针、无线串口桥、
-SPI/I2C/PWM 协议分析仪，以及让 AI 直接操控硬件的 MCP 接口。
-
-![platform](https://img.shields.io/badge/ESP32--S3-WROOM--1N16R8-0b6bcb?style=flat-square&logo=espressif&logoColor=white)
-![release](https://img.shields.io/github/v/release/zizhennini/nexlink?style=flat-square&logo=github&color=2dd4ee)
-![license](https://img.shields.io/github/license/zizhennini/nexlink?style=flat-square&color=34d399)
-![stars](https://img.shields.io/github/stars/zizhennini/nexlink?style=flat-square&color=fbbf24)
-![prs](https://img.shields.io/badge/PRs-welcome-38bdf8?style=flat-square&logo=github)
-
-</div>
+<p align="center">
+  <img alt="platform" src="https://img.shields.io/badge/ESP32--S3-WROOM--1N16R8-0b6bcb?style=flat-square&logo=espressif&logoColor=white">
+  <img alt="release" src="https://img.shields.io/github/v/release/zizhennini/nexlink?style=flat-square&logo=github&color=2dd4ee">
+  <img alt="license" src="https://img.shields.io/github/license/zizhennini/nexlink?style=flat-square&color=34d399">
+  <img alt="stars" src="https://img.shields.io/github/stars/zizhennini/nexlink?style=flat-square&color=fbbf24">
+  <img alt="prs" src="https://img.shields.io/badge/PRs-welcome-38bdf8?style=flat-square&logo=github">
+</p>
 
 > 🎯 **项目名称**：NexLink（仓库 [`zizhennini/nexlink`](https://github.com/zizhennini/nexlink)）
 > · 🏷️ **最新固件**：👉 [**v1.0.0 · nexlink.bin**](https://github.com/zizhennini/nexlink/releases/latest)
