@@ -1,7 +1,17 @@
-# 🔧 NexLink
+<div align="center">
+
+# ⚡ NexLink
 
 **ESP32-S3 无线硬件调试器** —— 一块板子上同时具备 USB CMSIS-DAP 探针、无线串口桥、
-SPI/I2C/PWM 协议分析仪、以及让 AI 直接操控硬件的 MCP 接口。
+SPI/I2C/PWM 协议分析仪，以及让 AI 直接操控硬件的 MCP 接口。
+
+![platform](https://img.shields.io/badge/ESP32--S3-WROOM--1N16R8-0b6bcb?style=flat-square&logo=espressif&logoColor=white)
+![release](https://img.shields.io/github/v/release/zizhennini/nexlink?style=flat-square&logo=github&color=2dd4ee)
+![license](https://img.shields.io/github/license/zizhennini/nexlink?style=flat-square&color=34d399)
+![stars](https://img.shields.io/github/stars/zizhennini/nexlink?style=flat-square&color=fbbf24)
+![prs](https://img.shields.io/badge/PRs-welcome-38bdf8?style=flat-square&logo=github)
+
+</div>
 
 > 🎯 **项目名称**：NexLink（仓库 [`zizhennini/nexlink`](https://github.com/zizhennini/nexlink)）
 > · 🏷️ **最新固件**：👉 [**v1.0.0 · nexlink.bin**](https://github.com/zizhennini/nexlink/releases/latest)
@@ -117,7 +127,7 @@ SPI/I2C/PWM 协议分析仪、以及让 AI 直接操控硬件的 MCP 接口。
 
 ### 🕒 带时间戳的抓包历史
 
-`/api/data` 是"读走即消费"的裸字节流——没有时间、没有方向，轮询一次就没了。
+`/api/data` 是“读走即消费”的裸字节流——没有时间、没有方向，轮询一次就没了。
 抓包模块（[`main/capture.c`](main/capture.c)）另外维护一份**有界环形历史**：
 
 - **微秒级时间戳 + 方向标记**（rx = 目标→主机，tx = 主机→目标）
@@ -187,7 +197,7 @@ python tools/ws_console.py --host <IP> --raw > log.bin # 只导出目标板数�
 
 - 双 OTA 槽（各 4 MB）+ `otadata`，`POST /api/ota` 把固件写入**非活动槽**后自动重启
 - **崩溃自动回滚**：新镜像启动失败（没走到 `app_main` 末尾）会被 bootloader 自动回退
-- OTA 与 USB 角色无关，`off` / `dap` / `ttl` 三种模式下都能推固件
+- OTA 与 USB 角色无关，`off`/`dap`/`ttl` 三种模式下都能推固件
 
 ### 🔎 USB 免串口诊断
 
@@ -247,12 +257,12 @@ python tools/ws_console.py --host <IP> --raw > log.bin # 只导出目标板数�
 |--------|--------|------|
 | 🖥️ **无线串口调试** | `TXD1→目标RX`、`RXD1←目标TX`、`GND` | 浏览器/TCP 3333 连 NexLink 即得无线串口助手 |
 | 🪝 **SWD 调试**（Keil/pyOCD/OpenOCD） | `SWCLK`、`SWDIO`、`NRST`、`GND` | 需先把 USB 角色切到 `dap`；插 USB-C 即识别为 CMSIS-DAP 探针 |
-| ⬇️ **USB-TTL 给目标烧录** | `TXD1/RXD1` 交叉、`NRST`、`BOOT/IO0`(任一 GPIO 拓展 IO)、`GND` | 角色切 `ttl`；`/api/dut/reset?boot=1` 可无线进下载模式 |
+| ⬇️ **USB-TTL 给目标烧录** | `TXD1/RXD1` 交叉、`NRST`、`BOOT/IO0`（任一 GPIO 拓展 IO）、`GND` | 角色切 `ttl`；`/api/dut/reset?boot=1` 可无线进下载模式 |
 | 🧮 **I2C 嗅探** | `SCL`、`SDA`、`GND` | Web「总线」页抓 I2C 读写事务（需先让出 SCL/SDA 协议位） |
 | 🎛️ **PWM 测量** | 任意拓展 IO（设为 `PWM` 协议）、`GND` | Web「总线」页实时看频率/占空比 |
 | 🏓 **SPI 抓包/发送** | `SCK/MOSI/MISO/CS`（拓展 IO 排列）、`GND` | 默认作从机抓包，发送时自动切主机 |
-| 🔊 **看 NexLink 日志** | `TXD0`(→USB-TTL 的 RX)、`RXD0`、`GND` | 115200 控制台，DAP/TTL 模式下原生 USB 被占用时用它 |
-| 🐦 **SWO/ITM 跟踪** | `SWO`(IO40)、`GND` | Keil 勾 Trace→SWO / pyOCD `--swo`，上限 4 Mbaud |
+| 🔊 **看 NexLink 日志** | `TXD0`（→USB-TTL 的 RX）、`RXD0`、`GND` | 115200 控制台，DAP/TTL 模式下原生 USB 被占用时用它 |
+| 🐦 **SWO/ITM 跟踪** | `SWO`（IO40）、`GND` | Keil 勾 Trace→SWO / pyOCD `--swo`，上限 4 Mbaud |
 
 ### JTAG 与 SWO 的引脚占用（重要）
 
@@ -268,7 +278,7 @@ python tools/ws_console.py --host <IP> --raw > log.bin # 只导出目标板数�
 
 **仲裁规则**：探针优先。启动时（`dap` 模式）[`main/debug_pins.c`](main/debug_pins.c) 接管这四个 IO，
 如果某个监控（SPI 抓包 / I2C 嗅探）正占着其中一个，**该监控会被停止并在日志与 `/api/status` 里说明原因**
-（`debug` / `debug_io` 两个字段），不会静默失效。
+（`debug`/`debug_io` 两个字段），不会静默失效。
 
 所以实际可用的协议排列只剩 **IO45 一个槽位**。这是一次明确的取舍：
 要么要 JTAG + SWO + 一个协议通道，要么要完整的 SPI+I2C 排列。
@@ -415,7 +425,7 @@ python tools/wifi_serial_bridge.py --status       # 只看状态
 **D. 当协议分析仪**
 
 在 Web 页把拓展 IO 配上 SPI 或 I2C 协议，然后把探针接到目标总线；
-`/api/spi` / `/api/i2c` 会返回抓到的历史事务，OLED 上也能实时滚屏查看。
+`/api/spi`/`/api/i2c` 会返回抓到的历史事务，OLED 上也能实时滚屏查看。
 注意探针同样是 3.3V 直连，5V 总线请先做电平转换，否则会打坏 IO。
 
 ### 无线固件升级（OTA）
@@ -428,7 +438,7 @@ curl.exe -H "Expect:" -X POST --data-binary "@build\nexlink.bin" http://<IP>/api
   设备的轻量 HTTP 服务器处理不了会重置连接（表现为 curl 错误 56）
 - **建议限速上传**：设备边收边擦写 flash，全速上传会在传输中途断连（exit 56），
   用 `--limit-rate 40K` 可稳定刷完整个固件
-- 升级写入非活动分区并自动重启；用 `/api/status` 的 `slot` / `ota` / `rst` 字段确认结果
+- 升级写入非活动分区并自动重启；用 `/api/status` 的 `slot`/`ota`/`rst` 字段确认结果
 
 ---
 
@@ -530,8 +540,8 @@ MS OS 描述符靠它才能生成）与 `add_compile_options(-pipe)`（避免临
 
 ### USB 探针相关
 
-**1. 设备管理器里 "NexLink CMSIS-DAP" 报代码 28（未安装驱动）**
-Windows 会把"此设备没有 OS 描述符"的结论按 `HKLM\SYSTEM\CurrentControlSet\Control\usbflags\<VID><PID><bcdDevice>`
+**1. 设备管理器里 “NexLink CMSIS-DAP” 报代码 28（未安装驱动）**
+Windows 会把“此设备没有 OS 描述符”的结论按 `HKLM\SYSTEM\CurrentControlSet\Control\usbflags\<VID><PID><bcdDevice>`
 缓存（`osvc=0,0` = 不再探测）。处理：把固件的 `bcdDevice` 上调（如 0x0100→0x0101）换新缓存键，重刷重启后会自动重握手。
 
 **2. 代码 10 / 43，主机反复复位、从不发 SET_CONFIGURATION**
@@ -544,7 +554,7 @@ Windows 会把"此设备没有 OS 描述符"的结论按 `HKLM\SYSTEM\CurrentCon
 
 **4. 确认探针真的在工作**
 `/api/status` 的 `dapcfg ≥ 1` 表示主机已完成配置；跑 Keil/pyOCD 时 `daprx`/`daptx` 应同步增长。
-`debug` / `debug_io` 显示调试探针占用了哪些拓展 IO。
+`debug`/`debug_io` 显示调试探针占用了哪些拓展 IO。
 
 ### JTAG / SWO 相关
 
@@ -554,22 +564,22 @@ JTAG 需要 TCK/TMS/TDI/TDO 四线（TCK/TMS 复用 SWCLK/SWDIO）；nTRST 在�
 
 **6. 切到 JTAG 后 SPI 抓包 / I2C 嗅探停了**
 这是预期行为：调试探针接管 IO48/IO38/IO39/IO40，日志与 `/api/status` 会写明是哪个监控被停止。
-把 USB 角色切回 `off` / `ttl` 即可让这些 IO 回到协议排列。
+把 USB 角色切回 `off`/`ttl` 即可让这些 IO 回到协议排列。
 
 **7. IDE 里看不到 SWO 输出**
 依次确认：目标已使能 ITM 且 SWO 引脚接到了 IO40；IDE 的 trace 时钟与目标 CPU 一致；
-速率不超过 4 Mbaud。目标侧 `TRACE_CR` 没使能时不会产生任何数据，宿主侧看起来就像"毫无反应"。
+速率不超过 4 Mbaud。目标侧 `TRACE_CR` 没使能时不会产生任何数据，宿主侧看起来就像“毫无反应”。
 
 ### 网络与串口
 
 **8. 连不上 WiFi** — 检查密码与信号；若设备进了 AP 模式，重连 `NexLink-xxxx` 重新配网。
 
-**6. 串口无数据** — 核对波特率（`/api/status` 可查当前值）、确认 TX/RX 交叉接线、确认目标板有输出。
+**9. 串口无数据** — 核对波特率（`/api/status` 可查当前值）、确认 TX/RX 交叉接线、确认目标板有输出。
 
-**7. 接 5V 目标板后 IO 损坏 / 行为异常** — 排针**没有电平转换**（TXB0106 已取消），
+**10. 接 5V 目标板后 IO 损坏 / 行为异常** — 排针**没有电平转换**（TXB0106 已取消），
 信号线是 ESP32-S3 原生 3.3V，5V 目标必须自行加转换后再接。
 
-**8. OTA 报 curl 错误 56** — 忘了加 `-H "Expect:"`。
+**11. OTA 报 curl 错误 56** — 忘了加 `-H "Expect:"`。
 
 ### 调试手段
 
